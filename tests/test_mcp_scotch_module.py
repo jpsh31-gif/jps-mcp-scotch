@@ -1,0 +1,260 @@
+"""Tests mcp_scotch — 5 subprocess wrappers scotch_v6.py CLI."""
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from jps_mcp_scotch.modules.mcp_scotch import MODULE
+from jps_mcp_scotch.modules.mcp_scotch.tools import handle
+
+
+def test_module_exposes_5_tools():
+    assert MODULE.name == "mcp_scotch"
+    names = {t["name"] for t in MODULE.tools}
+    assert names == {
+        "boot_jiminy", "boot_beta_prime", "boot_dispatch",
+        "checkpoint", "scotch_lint",
+    }
+
+
+def test_module_tools_have_input_schema():
+    for t in MODULE.tools:
+        assert t["inputSchema"]["type"] == "object"
+
+
+def test_handle_unknown_tool():
+    res = handle("nope", {})
+    assert "Unknown" in res["error"]
+
+
+def test_handle_exception_caught(monkeypatch):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+
+    def boom(_args):
+        raise RuntimeError("boom_scotch")
+
+    monkeypatch.setitem(t._HANDLERS, "boot_jiminy", boom)
+    res = handle("boot_jiminy", {})
+    assert "boom_scotch" in res["error"]
+
+
+# ──────────────────── boot_* ────────────────────
+
+
+def _make_fake_run_ok(stdout: str = "boot context OK\n"):
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+    return fake_run
+
+
+def test_boot_jiminy_happy_path(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("#!/usr/bin/env python3.13\n", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(t.subprocess, "run", _make_fake_run_ok("FONDATIONS+STATE OK\n"))
+
+    res = handle("boot_jiminy", {})
+    assert res["ok"] is True
+    assert res["agent"] == "jiminy"
+    assert res["budget"] == "normal"
+    assert "FONDATIONS" in res["context"]
+
+
+def test_boot_beta_prime_with_minimal_budget(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    handle("boot_beta_prime", {"budget": "minimal"})
+    assert "boot" in captured["cmd"]
+    assert "beta_prime" in captured["cmd"]
+    assert "minimal" in captured["cmd"]
+
+
+def test_boot_dispatch_default_budget(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(t.subprocess, "run", _make_fake_run_ok())
+
+    res = handle("boot_dispatch", {})
+    assert res["budget"] == "normal"
+
+
+def test_boot_invalid_budget_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    res = handle("boot_jiminy", {"budget": "huge"})
+    assert "error" in res
+    assert "budget" in res["error"]
+
+
+def test_boot_cli_missing_returns_error(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    # No tools/scotch_v6.py created → path missing
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    res = handle("boot_jiminy", {})
+    assert "error" in res
+    assert "scotch_v6.py not found" in res["error"]
+
+
+def test_boot_returncode_nonzero(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="STATE.md missing"),
+    )
+    res = handle("boot_jiminy", {})
+    assert "error" in res
+    assert "returncode=2" in res["error"]
+    assert "STATE.md missing" in res["stderr"]
+
+
+def test_boot_subprocess_timeout(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    def boom(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 60)
+    monkeypatch.setattr(t.subprocess, "run", boom)
+    res = handle("boot_jiminy", {})
+    assert "error" in res
+    assert "timed out" in res["error"]
+
+
+def test_boot_subprocess_oserror(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    def boom(cmd, **kw):
+        raise OSError("io")
+    monkeypatch.setattr(t.subprocess, "run", boom)
+    res = handle("boot_jiminy", {})
+    assert "error" in res
+    assert "subprocess failed" in res["error"]
+
+
+# ──────────────────── checkpoint ────────────────────
+
+
+def test_checkpoint_happy_path(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK: checkpoint ecrit pour jim\n", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("checkpoint", {"agent": "jim", "summary": "260517 test"})
+    assert res["ok"] is True
+    assert res["agent"] == "jim"
+    assert "OK" in res["stdout"]
+    assert "checkpoint" in captured["cmd"]
+    assert "jim" in captured["cmd"]
+    assert "260517 test" in captured["cmd"]
+
+
+def test_checkpoint_missing_agent():
+    assert "error" in handle("checkpoint", {"summary": "x"})
+
+
+def test_checkpoint_missing_summary():
+    assert "error" in handle("checkpoint", {"agent": "jim"})
+
+
+def test_checkpoint_non_string_agent():
+    assert "error" in handle("checkpoint", {"agent": 42, "summary": "x"})
+
+
+def test_checkpoint_summary_too_long(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    long_summary = "x" * (t.MAX_SUMMARY_LEN + 1)
+    res = handle("checkpoint", {"agent": "jim", "summary": long_summary})
+    assert "error" in res
+    assert "max length" in res["error"]
+
+
+# ──────────────────── scotch_lint ────────────────────
+
+
+def test_scotch_lint_happy_path(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="LINT OK 0 issues\n", stderr=""),
+    )
+    res = handle("scotch_lint", {})
+    assert res["ok"] is True
+    assert "LINT OK" in res["report"]
+
+
+def test_scotch_lint_returncode_nonzero(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="stale STATE"),
+    )
+    res = handle("scotch_lint", {})
+    assert "error" in res
+    assert "returncode=1" in res["error"]
+
+
+# ──────────────────── _resolve_jps_scotch_dir ────────────────────
+
+
+def test_resolve_jps_scotch_env_override(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    assert t._resolve_jps_scotch_dir() == tmp_path
+
+
+def test_resolve_jps_scotch_legacy_fallback(monkeypatch):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    monkeypatch.delenv("JPS_SCOTCH_DIR", raising=False)
+    resolved = t._resolve_jps_scotch_dir()
+    # Either sibling found OR legacy fallback (depending on test cwd)
+    assert isinstance(resolved, Path)
+    assert "jps-scotch" in str(resolved)

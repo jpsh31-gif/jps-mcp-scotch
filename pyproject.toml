@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jps-mcp-scotch"
+version = "0.1.0"
+description = "JPS MCP Scotch — scotch_v6.py subprocess wrappers (Phase 2B.5)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "JPS / Beta-Prime / Jim", email = "jp.sh31@gmail.com" }]
+dependencies = [
+    "jps-mcp >= 0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=4",
+]
+
+[project.entry-points."jps_mcp.modules"]
+mcp_scotch = "jps_mcp_scotch.modules.mcp_scotch.tools:MODULE"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src/jps_mcp_scotch"]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
