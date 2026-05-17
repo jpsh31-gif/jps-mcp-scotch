@@ -24,25 +24,57 @@ from jps_mcp.modules import Module
 _LEGACY_JPS_SCOTCH = "/Users/jp/Documents/GitHub/jps-scotch"
 DEFAULT_BUDGET = "normal"
 VALID_BUDGETS = {"minimal", "normal", "full"}
+# Canonical agents (FS form). Aliases jim/bp resolved before validation.
 VALID_AGENTS = {"jiminy", "beta_prime", "dispatch"}
-DEFAULT_TIMEOUT_S = int(os.environ.get("JPS_SCOTCH_TIMEOUT_S", "60"))
+AGENT_ALIASES = {"jim": "jiminy", "bp": "beta_prime"}
+MAX_SIBLING_WALK_DEPTH = 10
 MAX_SUMMARY_LEN = 4096
+
+
+def _parse_timeout(raw: str | None, default: int = 60) -> int:
+    """Parse timeout from env, reject non-positive or non-int values."""
+    try:
+        v = int(raw if raw is not None else default)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
+DEFAULT_TIMEOUT_S = _parse_timeout(os.environ.get("JPS_SCOTCH_TIMEOUT_S"))
+
+
+def _resolve_agent(agent: str) -> str:
+    """Resolve alias (jim→jiminy, bp→beta_prime) case-insensitive. Returns canonical form."""
+    if not isinstance(agent, str):
+        return ""
+    return AGENT_ALIASES.get(agent.lower(), agent)
 
 
 def _resolve_jps_scotch_dir() -> Path:
     """Resolve canonical jps-scotch path.
 
-    Priority: JPS_SCOTCH_DIR env > sibling-walk from this module > legacy fallback.
-    Mirror pattern jps_fondations (AAIF sibling-walk standard 2025).
+    Priority: JPS_SCOTCH_DIR env (if .is_dir()) > sibling-walk (bounded depth)
+    > legacy fallback. Mirror pattern jps_fondations (AAIF sibling-walk 2025).
+
+    Defensive: validates env path is_dir, bounds walk to MAX_SIBLING_WALK_DEPTH,
+    catches PermissionError on candidate.is_dir() (NFS/perm-restricted parents).
     """
     env = os.environ.get("JPS_SCOTCH_DIR")
     if env:
-        return Path(env)
+        p = Path(env)
+        try:
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
     here = Path(__file__).resolve()
-    for parent in here.parents:
+    for parent in list(here.parents)[:MAX_SIBLING_WALK_DEPTH]:
         candidate = parent / "jps-scotch"
-        if candidate.is_dir():
-            return candidate
+        try:
+            if candidate.is_dir():
+                return candidate
+        except (OSError, PermissionError):
+            continue
     return Path(_LEGACY_JPS_SCOTCH)
 
 
@@ -222,12 +254,22 @@ def boot_dispatch(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
-    agent = args.get("agent")
+    agent_raw = args.get("agent")
     summary = args.get("summary")
-    if not isinstance(agent, str) or not agent:
+    if not isinstance(agent_raw, str) or not agent_raw:
         return _err("agent is required (non-empty string)")
+    # Resolve alias (jim→jiminy, bp→beta_prime) then allowlist check.
+    # Prevents path-traversal / argv injection on canonical FS form.
+    agent = _resolve_agent(agent_raw)
+    if agent not in VALID_AGENTS:
+        return _err(
+            f"Invalid agent {agent_raw!r} (resolved={agent!r}). "
+            f"Allowed: {sorted(VALID_AGENTS)} (aliases: {sorted(AGENT_ALIASES)})"
+        )
     if not isinstance(summary, str) or not summary:
         return _err("summary is required (non-empty string)")
+    if "\x00" in summary:
+        return _err("summary must not contain null bytes")
     if len(summary) > MAX_SUMMARY_LEN:
         return _err(f"summary exceeds max length {MAX_SUMMARY_LEN}")
     res = _run_cli(["checkpoint", agent, summary])
@@ -236,6 +278,9 @@ def checkpoint(args: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "ok": True,
         "agent": agent,
+        "agent_alias_resolved": (
+            agent_raw if agent_raw == agent else f"{agent_raw}->{agent}"
+        ),
         "stdout": res["stdout"].strip(),
     }
 

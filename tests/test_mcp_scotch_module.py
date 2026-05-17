@@ -181,10 +181,10 @@ def test_checkpoint_happy_path(monkeypatch, tmp_path):
 
     res = handle("checkpoint", {"agent": "jim", "summary": "260517 test"})
     assert res["ok"] is True
-    assert res["agent"] == "jim"
+    assert res["agent"] == "jiminy"  # alias jim resolved to canonical
     assert "OK" in res["stdout"]
     assert "checkpoint" in captured["cmd"]
-    assert "jim" in captured["cmd"]
+    assert "jiminy" in captured["cmd"]
     assert "260517 test" in captured["cmd"]
 
 
@@ -202,11 +202,78 @@ def test_checkpoint_non_string_agent():
 
 def test_checkpoint_summary_too_long(monkeypatch, tmp_path):
     import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
     monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
     long_summary = "x" * (t.MAX_SUMMARY_LEN + 1)
     res = handle("checkpoint", {"agent": "jim", "summary": long_summary})
     assert "error" in res
     assert "max length" in res["error"]
+
+
+def test_checkpoint_invalid_agent_rejected(monkeypatch, tmp_path):
+    """ÉLEVÉ-1 regression: agent path-traversal blocked by VALID_AGENTS allowlist."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    for evil in ("../../etc/passwd", "jim; rm -rf /", "evil", "../../scotch"):
+        res = handle("checkpoint", {"agent": evil, "summary": "x"})
+        assert "error" in res, f"agent={evil!r} should be rejected"
+        assert "Invalid agent" in res["error"]
+
+
+def test_checkpoint_alias_jim_resolved_to_jiminy(monkeypatch, tmp_path):
+    """Aliases jim/bp resolved before allowlist check (frugalité tokens doctrine 270426)."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    res = handle("checkpoint", {"agent": "jim", "summary": "x"})
+    assert res["ok"] is True
+    assert res["agent"] == "jiminy"
+    assert "jim->jiminy" in res["agent_alias_resolved"]
+    assert "jiminy" in captured["cmd"]
+    assert "jim" not in captured["cmd"][-2:]  # Last 2 args should be agent+summary, agent=jiminy
+
+
+def test_checkpoint_summary_rejects_null_byte(monkeypatch, tmp_path):
+    """ÉLEVÉ-1 hardening: null bytes in summary blocked."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    res = handle("checkpoint", {"agent": "jim", "summary": "ok\x00evil"})
+    assert "error" in res
+    assert "null bytes" in res["error"]
+
+
+def test_checkpoint_cli_error_propagation(monkeypatch, tmp_path):
+    """MINEUR-1: error envelope from _run_cli propagated to handler caller."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="vault missing"),
+    )
+    res = handle("checkpoint", {"agent": "jim", "summary": "x"})
+    assert "error" in res
+    assert "returncode=1" in res["error"]
+    assert "vault missing" in res["stderr"]
 
 
 # ──────────────────── scotch_lint ────────────────────
@@ -258,3 +325,34 @@ def test_resolve_jps_scotch_legacy_fallback(monkeypatch):
     # Either sibling found OR legacy fallback (depending on test cwd)
     assert isinstance(resolved, Path)
     assert "jps-scotch" in str(resolved)
+
+
+def test_resolve_jps_scotch_env_invalid_path_falls_back(monkeypatch):
+    """MOYEN-1: JPS_SCOTCH_DIR pointing to non-existent path falls through to walk/legacy."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    monkeypatch.setenv("JPS_SCOTCH_DIR", "/no/such/path/__never_exists__")
+    resolved = t._resolve_jps_scotch_dir()
+    # Must NOT return the invalid env path
+    assert str(resolved) != "/no/such/path/__never_exists__"
+
+
+# ──────────────────── _parse_timeout ────────────────────
+
+
+def test_parse_timeout_valid():
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    assert t._parse_timeout("30") == 30
+
+
+def test_parse_timeout_invalid_falls_back_to_default():
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    assert t._parse_timeout("not-a-number") == 60
+    assert t._parse_timeout(None) == 60
+
+
+def test_parse_timeout_non_positive_falls_back():
+    """MOYEN-2: timeout=0 or negative falls back to default."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    assert t._parse_timeout("0") == 60
+    assert t._parse_timeout("-5") == 60
+    assert t._parse_timeout("0", default=10) == 10
