@@ -33,3 +33,11 @@ JPS MCP Scotch — `scotch_v6.py` subprocess wrappers (Phase 2B.5 sibling).
 ```bash
 pip install -e .
 ```
+
+## Coordinated dependency
+
+This sibling repo's tools are gated by `jps-mcp/src/jps_mcp/profile_filter.py`.
+Phase 2B.5 requires the matching `_SCOTCH_FULL` / `_SCOTCH_READ` allowlists in
+the parent repo. Without them, the dispatcher HTTP filter rejects all 5 tools
+for every profile (module dead in production). Merge `jps-mcp` Phase 2B.5
+branch first (or simultaneously) before merging this repo to main.

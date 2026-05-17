@@ -44,7 +44,13 @@ DEFAULT_TIMEOUT_S = _parse_timeout(os.environ.get("JPS_SCOTCH_TIMEOUT_S"))
 
 
 def _resolve_agent(agent: str) -> str:
-    """Resolve alias (jim→jiminy, bp→beta_prime) case-insensitive. Returns canonical form."""
+    """Resolve agent identifier to canonical FS form.
+
+    Aliases (jim/bp) are matched case-insensitively → jiminy/beta_prime.
+    Canonical agents (jiminy/beta_prime/dispatch) must already be lowercase —
+    "JIMINY" is NOT normalized; pass it through unchanged so the downstream
+    VALID_AGENTS allowlist rejects it explicitly.
+    """
     if not isinstance(agent, str):
         return ""
     return AGENT_ALIASES.get(agent.lower(), agent)
