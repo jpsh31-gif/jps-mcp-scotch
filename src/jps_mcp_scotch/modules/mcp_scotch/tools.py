@@ -50,9 +50,11 @@ def _resolve_agent(agent: str) -> str:
     Canonical agents (jiminy/beta_prime/dispatch) must already be lowercase —
     "JIMINY" is NOT normalized; pass it through unchanged so the downstream
     VALID_AGENTS allowlist rejects it explicitly.
+
+    Type pre-check (isinstance str) is enforced by the single caller
+    (`checkpoint()`) before this helper runs — MINEUR-1 fix Phase 2B.5
+    cycle 2 (dead `not isinstance` branch removed, was unreachable).
     """
-    if not isinstance(agent, str):
-        return ""
     return AGENT_ALIASES.get(agent.lower(), agent)
 
 
