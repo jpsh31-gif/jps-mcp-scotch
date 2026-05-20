@@ -26,12 +26,27 @@ JPS MCP Scotch — `scotch_v6.py` subprocess wrappers (Phase 2B.5 sibling).
 ## Config
 
 - `JPS_SCOTCH_DIR` (default: `~/Documents/GitHub/jps-scotch` via sibling-walk fallback)
-- `JPS_SCOTCH_BUDGET` (default: `normal`; valid: `minimal` | `normal` | `full`)
+- `JPS_SCOTCH_TIMEOUT_S` (default: `60`; positive integer)
 
 ## Install
 
 ```bash
+# 1. Install sibling jps-mcp first (local, not on PyPI):
+pip install -e ../jps-mcp
+# 2. Install this package:
 pip install -e .
+```
+
+## Tests
+
+Tests use a root `conftest.py` that locates the sibling `jps-mcp/src/` via a
+bounded parent-walk and adds it to `sys.path` — so the test-suite is
+reproducible from a virgin venv without needing a prior `pip install -e
+../jps-mcp` (ÉLEVÉ-1 fix Phase 2B.5 cycle 2):
+
+```bash
+pip install -e '.[dev]'
+pytest
 ```
 
 ## Coordinated dependency

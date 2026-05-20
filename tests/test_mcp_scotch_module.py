@@ -244,7 +244,11 @@ def test_checkpoint_alias_jim_resolved_to_jiminy(monkeypatch, tmp_path):
     assert res["agent"] == "jiminy"
     assert "jim->jiminy" in res["agent_alias_resolved"]
     assert "jiminy" in captured["cmd"]
-    assert "jim" not in captured["cmd"][-2:]  # Last 2 args should be agent+summary, agent=jiminy
+    # MINEUR-2 fix Phase 2B.5 cycle 2: positional assertion (in-on-list checks
+    # element equality, not substring — old check missed "jim_raw"-style leaks).
+    # CLI form: [python, scotch_v6.py, "checkpoint", "<agent>", "<summary>"]
+    assert captured["cmd"][-2] == "jiminy"
+    assert captured["cmd"][-1] == "x"
 
 
 def test_checkpoint_summary_rejects_null_byte(monkeypatch, tmp_path):
