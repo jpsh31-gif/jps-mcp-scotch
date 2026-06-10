@@ -601,3 +601,34 @@ def test_scotch_append_blank_content_rejected(monkeypatch, tmp_path):
         res = handle("scotch_append", {"agent": "jim", "content": blank})
         assert "error" in res, f"content={blank!r} should be rejected"
         assert "content" in res["error"]
+
+
+# ──────────────────── budget riche alignment (Inspecteur MINEUR-3 260610) ────────────────────
+
+
+def test_boot_budget_riche_valid(monkeypatch, tmp_path):
+    """budget=riche (canonical scotch_v6) accepté + passé au CLI."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ctx", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    res = handle("boot_jiminy", {"budget": "riche"})
+    assert res["ok"] is True
+    assert res["budget"] == "riche"
+    assert "riche" in captured["cmd"]
+
+
+def test_boot_budget_full_rejected_cleanly(monkeypatch, tmp_path):
+    """budget=full (n'existe pas côté scotch_v6) rejeté proprement côté MCP (pas subprocess silencieux)."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(t.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    res = handle("boot_jiminy", {"budget": "full"})
+    assert "error" in res
+    assert "budget" in res["error"]
+    assert calls == []  # rejected before subprocess

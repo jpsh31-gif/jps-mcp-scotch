@@ -24,7 +24,9 @@ from jps_mcp.modules import Module
 
 _LEGACY_JPS_SCOTCH = "/Users/jp/Documents/GitHub/jps-scotch"
 DEFAULT_BUDGET = "normal"
-VALID_BUDGETS = {"minimal", "normal", "full"}
+# Aligné sur canonical scotch_v6.py VALID_BUDGETS = ("minimal","normal","riche").
+# Inspecteur MINEUR-3 260610: "full" rejeté par scotch_v6 → divergence corrigée.
+VALID_BUDGETS = {"minimal", "normal", "riche"}
 # Canonical agents (FS form). Aliases jim/bp resolved before validation.
 VALID_AGENTS = {"jiminy", "beta_prime", "dispatch"}
 AGENT_ALIASES = {"jim": "jiminy", "bp": "beta_prime"}
