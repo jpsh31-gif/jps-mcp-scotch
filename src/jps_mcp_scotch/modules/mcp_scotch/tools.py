@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,6 +30,13 @@ VALID_AGENTS = {"jiminy", "beta_prime", "dispatch"}
 AGENT_ALIASES = {"jim": "jiminy", "bp": "beta_prime"}
 MAX_SIBLING_WALK_DEPTH = 10
 MAX_SUMMARY_LEN = 4096
+# V1 migration 260610: bornes argv pour scotch_query/scotch_append (anti ARG_MAX / DoS).
+MAX_QUESTION_LEN = 2048
+MAX_CONTENT_LEN = 8192
+DEFAULT_TOP_K = 5
+MAX_TOP_K = 100  # borne sup top_k (anti memory-exhaustion RAG — Inspecteur MINEUR-2 260610)
+# rag-refresh = ingest embeddings, lent → timeout généreux (override DEFAULT_TIMEOUT_S 60s).
+RAG_REFRESH_TIMEOUT_S = 600
 
 
 def _parse_timeout(raw: str | None, default: int = 60) -> int:
@@ -221,6 +229,70 @@ TOOLS: List[Dict[str, Any]] = [
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "scotch_query",
+        "description": (
+            "Query SCOTCH RAG (collection scotch, semantic search). Subprocess wrapper "
+            "scotch_v6.py query. Read-only. USE BEFORE affirming system state "
+            "(rule scotch-lecture-obligatoire)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Natural language query against SCOTCH RAG.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of chunks to retrieve.",
+                    "default": DEFAULT_TOP_K,
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "scotch_append",
+        "description": (
+            "Append raw timestamped note to agent STATE.md (no RAG, lightweight). "
+            "Subprocess wrapper scotch_v6.py state-append. Distinct de checkpoint "
+            "(STATE+RAG). Trusted-local only (write authority). Aliases jim, bp."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "Agent identifier (jiminy/beta_prime/dispatch). Aliases jim, bp.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Raw note content appended to STATE.md.",
+                },
+            },
+            "required": ["agent", "content"],
+        },
+    },
+    {
+        "name": "scotch_rag_refresh",
+        "description": (
+            "Re-ingest FONDATIONS/T4/T5 into SCOTCH RAG. Subprocess wrapper "
+            "scotch_v6.py rag-refresh. Slow op (embeddings). Trusted-local only "
+            "(write authority). Use dry_run=true to preview."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview without writing to RAG.",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -303,12 +375,80 @@ def scotch_lint(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def scotch_query(args: Dict[str, Any]) -> Dict[str, Any]:
+    question = args.get("question")
+    if not isinstance(question, str) or not question:
+        return _err("question is required (non-empty string)")
+    if "\x00" in question:
+        return _err("question must not contain null bytes")
+    if len(question) > MAX_QUESTION_LEN:
+        return _err(f"question exceeds max length {MAX_QUESTION_LEN}")
+    top_k = args.get("top_k", DEFAULT_TOP_K)
+    # bool is an int subclass — reject explicitly so True/False can't pass as top_k.
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+        return _err(f"Invalid top_k {top_k!r}: must be a positive integer")
+    if top_k > MAX_TOP_K:
+        return _err(f"top_k {top_k} exceeds max {MAX_TOP_K}")
+    res = _run_cli(["query", question, "--top-k", str(top_k)])
+    if "error" in res:
+        return res
+    return {"ok": True, "question": question, "top_k": top_k, "results": res["stdout"]}
+
+
+def scotch_append(args: Dict[str, Any]) -> Dict[str, Any]:
+    agent_raw = args.get("agent")
+    content = args.get("content")
+    if not isinstance(agent_raw, str) or not agent_raw:
+        return _err("agent is required (non-empty string)")
+    # Resolve alias then allowlist check (path-traversal / argv-injection guard).
+    agent = _resolve_agent(agent_raw)
+    if agent not in VALID_AGENTS:
+        return _err(
+            f"Invalid agent {agent_raw!r} (resolved={agent!r}). "
+            f"Allowed: {sorted(VALID_AGENTS)} (aliases: {sorted(AGENT_ALIASES)})"
+        )
+    if not isinstance(content, str) or not content.strip():
+        return _err("content is required (non-empty, non-blank string)")
+    if "\x00" in content:
+        return _err("content must not contain null bytes")
+    if len(content) > MAX_CONTENT_LEN:
+        return _err(f"content exceeds max length {MAX_CONTENT_LEN}")
+    # mvp0 scotch_append semantics: note brute timestampée (séparateur + header).
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    decorated = f"\n\n## [{ts}] MCP-APPEND\n{content}"
+    res = _run_cli(["state-append", agent, decorated])
+    if "error" in res:
+        return res
+    return {
+        "ok": True,
+        "agent": agent,
+        "agent_alias_resolved": (
+            agent_raw if agent_raw == agent else f"{agent_raw}->{agent}"
+        ),
+        "stdout": res["stdout"].strip(),
+    }
+
+
+def scotch_rag_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
+    dry_run = bool(args.get("dry_run", False))
+    cli_args = ["rag-refresh"]
+    if dry_run:
+        cli_args.append("--dry-run")
+    res = _run_cli(cli_args, timeout=RAG_REFRESH_TIMEOUT_S)
+    if "error" in res:
+        return res
+    return {"ok": True, "dry_run": dry_run, "stdout": res["stdout"]}
+
+
 _HANDLERS = {
     "boot_jiminy": boot_jiminy,
     "boot_beta_prime": boot_beta_prime,
     "boot_dispatch": boot_dispatch,
     "checkpoint": checkpoint,
     "scotch_lint": scotch_lint,
+    "scotch_query": scotch_query,
+    "scotch_append": scotch_append,
+    "scotch_rag_refresh": scotch_rag_refresh,
 }
 
 
