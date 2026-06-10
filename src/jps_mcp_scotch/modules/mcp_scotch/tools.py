@@ -1,4 +1,4 @@
-"""mcp_scotch tools — 5 wrappers subprocess scotch_v6.py CLI.
+"""mcp_scotch tools — 9 wrappers subprocess scotch_v6.py CLI.
 
 Source canonique: /Users/jp/Documents/GitHub/jps-scotch/tools/scotch_v6.py
 (shebang python3.13, chromadb 1.4.1, RAG 45286 chunks 5 collections).
@@ -232,6 +232,29 @@ TOOLS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "scotch_read",
+        "description": (
+            "Boot SCOTCH context for ANY agent (param). FONDATIONS.md + STATE.md "
+            "+ RAG top-5. Subprocess wrapper scotch_v6.py boot <agent>. Read-only. "
+            "Forme générique de boot_jiminy/beta_prime/dispatch. Aliases jim, bp."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "Agent identifier (jiminy/beta_prime/dispatch). Aliases jim, bp.",
+                },
+                "budget": {
+                    "type": "string",
+                    "enum": sorted(VALID_BUDGETS),
+                    "default": DEFAULT_BUDGET,
+                },
+            },
+            "required": ["agent"],
+        },
+    },
+    {
         "name": "scotch_query",
         "description": (
             "Query SCOTCH RAG (collection scotch, semantic search). Subprocess wrapper "
@@ -377,6 +400,29 @@ def scotch_lint(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def scotch_read(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Generic boot read for any agent (vs boot_jiminy/beta_prime/dispatch fixed).
+
+    Parité mvp0 scotch_read(agent). Frugalité tool-list (1 outil param vs 3 fixes).
+    """
+    agent_raw = args.get("agent")
+    if not isinstance(agent_raw, str) or not agent_raw:
+        return _err("agent is required (non-empty string)")
+    agent = _resolve_agent(agent_raw)
+    if agent not in VALID_AGENTS:
+        return _err(
+            f"Invalid agent {agent_raw!r} (resolved={agent!r}). "
+            f"Allowed: {sorted(VALID_AGENTS)} (aliases: {sorted(AGENT_ALIASES)})"
+        )
+    out = _boot_agent(agent, args)
+    if "error" in out:
+        return out
+    out["agent_alias_resolved"] = (
+        agent_raw if agent_raw == agent else f"{agent_raw}->{agent}"
+    )
+    return out
+
+
 def scotch_query(args: Dict[str, Any]) -> Dict[str, Any]:
     question = args.get("question")
     if not isinstance(question, str) or not question:
@@ -448,6 +494,7 @@ _HANDLERS = {
     "boot_dispatch": boot_dispatch,
     "checkpoint": checkpoint,
     "scotch_lint": scotch_lint,
+    "scotch_read": scotch_read,
     "scotch_query": scotch_query,
     "scotch_append": scotch_append,
     "scotch_rag_refresh": scotch_rag_refresh,
