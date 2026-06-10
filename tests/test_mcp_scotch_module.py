@@ -10,12 +10,14 @@ from jps_mcp_scotch.modules.mcp_scotch import MODULE
 from jps_mcp_scotch.modules.mcp_scotch.tools import handle
 
 
-def test_module_exposes_5_tools():
+def test_module_exposes_8_tools():
     assert MODULE.name == "mcp_scotch"
     names = {t["name"] for t in MODULE.tools}
     assert names == {
         "boot_jiminy", "boot_beta_prime", "boot_dispatch",
         "checkpoint", "scotch_lint",
+        # V1 migration mvp0→jps-mcp gap-list (260610): 3 nouveaux
+        "scotch_query", "scotch_append", "scotch_rag_refresh",
     }
 
 
@@ -360,3 +362,242 @@ def test_parse_timeout_non_positive_falls_back():
     assert t._parse_timeout("0") == 60
     assert t._parse_timeout("-5") == 60
     assert t._parse_timeout("0", default=10) == 10
+
+
+# ──────────────────── scotch_query (V1 260610) ────────────────────
+
+
+def _setup_fake_cli(monkeypatch, tmp_path):
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    return cli
+
+
+def test_scotch_query_happy_path(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="RAG chunk 1\nRAG chunk 2\n", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("scotch_query", {"question": "where is doctrine 280428", "top_k": 3})
+    assert res["ok"] is True
+    assert "RAG chunk 1" in res["results"]
+    assert "query" in captured["cmd"]
+    assert "where is doctrine 280428" in captured["cmd"]
+    assert "--top-k" in captured["cmd"]
+    assert "3" in captured["cmd"]
+
+
+def test_scotch_query_default_top_k(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    handle("scotch_query", {"question": "q"})
+    assert "5" in captured["cmd"]  # default top_k
+
+
+def test_scotch_query_missing_question():
+    res = handle("scotch_query", {})
+    assert "error" in res
+    assert "question" in res["error"]
+
+
+def test_scotch_query_invalid_top_k(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    for bad in (0, -1, "five", 1.5):
+        res = handle("scotch_query", {"question": "q", "top_k": bad})
+        assert "error" in res, f"top_k={bad!r} should be rejected"
+        assert "top_k" in res["error"]
+
+
+def test_scotch_query_null_byte_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_query", {"question": "ok\x00evil"})
+    assert "error" in res
+    assert "null" in res["error"].lower()
+
+
+def test_scotch_query_returncode_nonzero(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="RAG down"),
+    )
+    res = handle("scotch_query", {"question": "q"})
+    assert "error" in res
+    assert "returncode=2" in res["error"]
+
+
+# ──────────────────── scotch_append (V1 260610) ────────────────────
+
+
+def test_scotch_append_happy_path(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK: append STATE.md pour jiminy\n", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("scotch_append", {"agent": "jim", "content": "note rapide"})
+    assert res["ok"] is True
+    assert res["agent"] == "jiminy"  # alias resolved
+    assert "state-append" in captured["cmd"]
+    # CLI form: [python, scotch_v6.py, "state-append", "<agent>", "<content>"]
+    assert captured["cmd"][-2] == "jiminy"
+    assert "note rapide" in captured["cmd"][-1]
+    assert "MCP-APPEND" in captured["cmd"][-1]  # decorated timestamp header
+
+
+def test_scotch_append_missing_agent():
+    res = handle("scotch_append", {"content": "x"})
+    assert "error" in res
+    assert "agent" in res["error"]
+
+
+def test_scotch_append_missing_content():
+    res = handle("scotch_append", {"agent": "jim"})
+    assert "error" in res
+    assert "content" in res["error"]
+
+
+def test_scotch_append_invalid_agent_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    for evil in ("../../etc/passwd", "evil", "jim; rm -rf /"):
+        res = handle("scotch_append", {"agent": evil, "content": "x"})
+        assert "error" in res, f"agent={evil!r} should be rejected"
+        assert "Invalid agent" in res["error"]
+
+
+def test_scotch_append_null_byte_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_append", {"agent": "jim", "content": "ok\x00evil"})
+    assert "error" in res
+    assert "null" in res["error"].lower()
+
+
+def test_scotch_append_returncode_nonzero(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="agent dir missing"),
+    )
+    res = handle("scotch_append", {"agent": "jim", "content": "x"})
+    assert "error" in res
+    assert "returncode=1" in res["error"]
+
+
+# ──────────────────── scotch_rag_refresh (V1 260610) ────────────────────
+
+
+def test_scotch_rag_refresh_default(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"ok": 1}', stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("scotch_rag_refresh", {})
+    assert res["ok"] is True
+    assert "rag-refresh" in captured["cmd"]
+    assert "--dry-run" not in captured["cmd"]
+    assert res["dry_run"] is False
+
+
+def test_scotch_rag_refresh_dry_run(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"dry": 1}', stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("scotch_rag_refresh", {"dry_run": True})
+    assert res["ok"] is True
+    assert "--dry-run" in captured["cmd"]
+    assert res["dry_run"] is True
+
+
+def test_scotch_rag_refresh_returncode_nonzero(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="ingest fail"),
+    )
+    res = handle("scotch_rag_refresh", {})
+    assert "error" in res
+    assert "returncode=2" in res["error"]
+
+
+# ──────────────────── guards bornes argv (V1 260610) ────────────────────
+
+
+def test_scotch_query_too_long_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_query", {"question": "x" * (t.MAX_QUESTION_LEN + 1)})
+    assert "error" in res
+    assert "max length" in res["error"]
+
+
+def test_scotch_query_top_k_bool_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_query", {"question": "q", "top_k": True})
+    assert "error" in res
+    assert "top_k" in res["error"]
+
+
+def test_scotch_append_content_too_long_rejected(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_append", {"agent": "jim", "content": "x" * (t.MAX_CONTENT_LEN + 1)})
+    assert "error" in res
+    assert "max length" in res["error"]
+
+
+# ──────────────────── Inspecteur MINEUR/NITS fixes (260610) ────────────────────
+
+
+def test_scotch_query_top_k_too_large_rejected(monkeypatch, tmp_path):
+    """MINEUR-2 Inspecteur: top_k borné supérieurement (anti memory-exhaustion RAG)."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_query", {"question": "q", "top_k": t.MAX_TOP_K + 1})
+    assert "error" in res
+    assert "top_k" in res["error"]
+
+
+def test_scotch_append_blank_content_rejected(monkeypatch, tmp_path):
+    """NITS-1 Inspecteur: content whitespace-only rejeté (anti pollution STATE.md)."""
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    for blank in ("   ", "\n", "\t  \n"):
+        res = handle("scotch_append", {"agent": "jim", "content": blank})
+        assert "error" in res, f"content={blank!r} should be rejected"
+        assert "content" in res["error"]
