@@ -10,7 +10,7 @@ from jps_mcp_scotch.modules.mcp_scotch import MODULE
 from jps_mcp_scotch.modules.mcp_scotch.tools import handle
 
 
-def test_module_exposes_8_tools():
+def test_module_exposes_9_tools_exact_set():
     assert MODULE.name == "mcp_scotch"
     names = {t["name"] for t in MODULE.tools}
     assert names == {
@@ -18,6 +18,8 @@ def test_module_exposes_8_tools():
         "checkpoint", "scotch_lint",
         # V1 migration mvp0→jps-mcp gap-list (260610): 3 nouveaux
         "scotch_query", "scotch_append", "scotch_rag_refresh",
+        # V2 re-audit gap (260610): scotch_read générique
+        "scotch_read",
     }
 
 
@@ -632,3 +634,75 @@ def test_boot_budget_full_rejected_cleanly(monkeypatch, tmp_path):
     assert "error" in res
     assert "budget" in res["error"]
     assert calls == []  # rejected before subprocess
+
+
+# ──────────────────── scotch_read générique (V2 re-audit gap, 260610) ────────────────────
+# Distinct des boot_jiminy/beta_prime/dispatch (agent fixe) : 1 outil, param agent.
+# Parité mvp0 scotch_read(agent). Frugalité tool-list (1 vs 3).
+# NB: count exact + présence scotch_read couverts par test_module_exposes_9_tools_exact_set.
+
+
+def test_scotch_read_happy_alias(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="CTX jiminy", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+
+    res = handle("scotch_read", {"agent": "jim", "budget": "normal"})
+    assert res["ok"] is True
+    assert res["agent"] == "jiminy"
+    assert res["budget"] == "normal"
+    assert "CTX jiminy" in res["context"]
+    assert "boot" in captured["cmd"]
+    assert captured["cmd"][-3] == "jiminy"  # [..., boot, jiminy, --budget, normal]
+    assert "normal" in captured["cmd"]
+
+
+def test_scotch_read_riche_budget(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="x", stderr="")
+    monkeypatch.setattr(t.subprocess, "run", fake_run)
+    res = handle("scotch_read", {"agent": "beta_prime", "budget": "riche"})
+    assert res["ok"] is True
+    assert "riche" in captured["cmd"]
+
+
+def test_scotch_read_missing_agent():
+    res = handle("scotch_read", {})
+    assert "error" in res
+    assert "agent" in res["error"]
+
+
+def test_scotch_read_invalid_agent(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    for evil in ("rogue", "../../etc", "jim; rm -rf /"):
+        res = handle("scotch_read", {"agent": evil})
+        assert "error" in res
+        assert "Invalid agent" in res["error"]
+
+
+def test_scotch_read_invalid_budget(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    res = handle("scotch_read", {"agent": "jim", "budget": "huge"})
+    assert "error" in res
+    assert "budget" in res["error"]
+
+
+def test_scotch_read_default_budget(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    _setup_fake_cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(t.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="x", stderr=""))
+    res = handle("scotch_read", {"agent": "dispatch"})
+    assert res["budget"] == "normal"
