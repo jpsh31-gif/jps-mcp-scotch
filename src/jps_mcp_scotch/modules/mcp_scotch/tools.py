@@ -21,7 +21,9 @@ from typing import Any, Dict, List
 
 try:
     import chromadb  # type: ignore[import]
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover  # noqa: BLE001
+    # ImportError ne suffit pas : chromadb casse sous python3.14 avec
+    # pydantic.v1.errors.ConfigError pendant l'import (constaté 260612).
     chromadb = None  # type: ignore[assignment]
 
 from jps_mcp.modules import Module
