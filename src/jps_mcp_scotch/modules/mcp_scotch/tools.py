@@ -1,23 +1,28 @@
-"""mcp_scotch tools — 9 wrappers subprocess scotch_v6.py CLI.
+"""mcp_scotch tools — 9 subprocess wrappers scotch_v6.py CLI + 3 direct chromadb RAG tools.
 
 Source canonique: /Users/jp/Documents/GitHub/jps-scotch/tools/scotch_v6.py
-(shebang python3.13, chromadb 1.4.1, RAG 45286 chunks 5 collections).
+(shebang python3.13, chromadb 1.5.0, RAG 45286 chunks 5 collections).
 
 Doctrine:
   - jps-scotch/ INTOUCHABLE — wrappers subprocess only, zero direct fs writes
   - profile gating: checkpoint = trusted_local only (write authority)
-  - boot_*/scotch_lint = read-only, available to readonly profiles
-
-stdlib only.
+  - boot_*/scotch_lint/rag_query/rag_stats = read-only, available to readonly profiles
+  - rag_ingest = write-authority profiles only (not profile_default)
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+
+try:
+    import chromadb  # type: ignore[import]
+except ImportError:  # pragma: no cover
+    chromadb = None  # type: ignore[assignment]
 
 from jps_mcp.modules import Module
 
@@ -39,6 +44,13 @@ DEFAULT_TOP_K = 5
 MAX_TOP_K = 100  # borne sup top_k (anti memory-exhaustion RAG — Inspecteur MINEUR-2 260610)
 # rag-refresh = ingest embeddings, lent → timeout généreux (override DEFAULT_TIMEOUT_S 60s).
 RAG_REFRESH_TIMEOUT_S = 600
+
+# RAG tool constants (V7 RAG 260612)
+VALID_COLLECTIONS = {"scotch", "history", "doctrine", "skills", "mvp0_legacy"}
+INGEST_BLOCKED_COLLECTIONS = {"mvp0_legacy"}
+ALLOWED_INGEST_EXTENSIONS = {".md", ".txt"}
+INGEST_ALLOWED_ROOT = "/Users/jp/Documents/GitHub/"
+MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def _parse_timeout(raw: str | None, default: int = 60) -> int:
@@ -94,6 +106,14 @@ def _resolve_jps_scotch_dir() -> Path:
         except (OSError, PermissionError):
             continue
     return Path(_LEGACY_JPS_SCOTCH)
+
+
+def _resolve_rag_dir() -> Path:
+    """Resolve RAG chromadb directory. JPS_RAG_DIR env var overrides (test isolation)."""
+    env = os.environ.get("JPS_RAG_DIR")
+    if env:
+        return Path(env)
+    return Path(_LEGACY_JPS_SCOTCH) / "scotch" / "rag"
 
 
 def _scotch_cli_path() -> Path:
@@ -318,6 +338,67 @@ TOOLS: List[Dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "rag_query",
+        "description": (
+            "Semantic search in a ChromaDB RAG collection. "
+            "Returns top-k chunks with text, source and similarity score."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language query.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Number of results to return (1-100, default 5).",
+                    "default": 5,
+                },
+                "collection": {
+                    "type": "string",
+                    "enum": ["scotch", "history", "doctrine", "skills", "mvp0_legacy"],
+                    "description": "ChromaDB collection to query (default: scotch).",
+                    "default": "scotch",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "rag_stats",
+        "description": "Return chunk counts per collection and total in the RAG store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "rag_ingest",
+        "description": (
+            "Ingest a .md or .txt file into a ChromaDB collection. "
+            "File must be under /Users/jp/Documents/GitHub/. "
+            "mvp0_legacy is read-only and cannot be ingested into."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to file to ingest (must be under /Users/jp/Documents/GitHub/).",
+                },
+                "collection": {
+                    "type": "string",
+                    "enum": ["scotch", "history", "doctrine", "skills"],
+                    "description": "Target collection (default: scotch).",
+                    "default": "scotch",
+                },
+            },
+            "required": ["path"],
+        },
+    },
 ]
 
 
@@ -488,6 +569,103 @@ def scotch_rag_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "dry_run": dry_run, "stdout": res["stdout"]}
 
 
+def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
+    if chromadb is None:
+        return _err("chromadb not installed")
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return _err("query must be a non-empty string")
+    k = args.get("k", DEFAULT_TOP_K)
+    if isinstance(k, bool):
+        return _err("k must be an integer, not bool")
+    if not isinstance(k, int) or k <= 0:
+        return _err("k must be a positive integer")
+    if k > MAX_TOP_K:
+        return _err(f"k must be <= {MAX_TOP_K}")
+    collection = args.get("collection", "scotch")
+    if collection not in VALID_COLLECTIONS:
+        return _err(f"Invalid collection '{collection}'. Valid: {sorted(VALID_COLLECTIONS)}")
+    rag_dir = _resolve_rag_dir()
+    try:
+        client = chromadb.PersistentClient(path=str(rag_dir))
+        col = client.get_collection(collection)
+        results = col.query(query_texts=[query], n_results=k)
+    except Exception as e:
+        return _err(f"ChromaDB error: {e}")
+    docs = results["documents"][0] if results.get("documents") else []
+    metas = results["metadatas"][0] if results.get("metadatas") else []
+    dists = results["distances"][0] if results.get("distances") else []
+    chunks = [
+        {"text": d, "source": m.get("source", ""), "score": round(1.0 - dist, 6)}
+        for d, m, dist in zip(docs, metas, dists)
+    ]
+    return {"ok": True, "results": chunks, "collection": collection, "k": k}
+
+
+def rag_stats(args: Dict[str, Any]) -> Dict[str, Any]:  # noqa: ARG001
+    if chromadb is None:
+        return _err("chromadb not installed")
+    rag_dir = _resolve_rag_dir()
+    try:
+        client = chromadb.PersistentClient(path=str(rag_dir))
+        collections_info: Dict[str, Any] = {}
+        for col_obj in client.list_collections():
+            col = client.get_collection(col_obj.name)
+            collections_info[col_obj.name] = {"count": col.count()}
+    except Exception as e:
+        return _err(f"ChromaDB error: {e}")
+    total = sum(v["count"] for v in collections_info.values())
+    return {"ok": True, "collections": collections_info, "total": total}
+
+
+def rag_ingest(args: Dict[str, Any]) -> Dict[str, Any]:
+    if chromadb is None:
+        return _err("chromadb not installed")
+    path_str = args.get("path")
+    if not isinstance(path_str, str):
+        return _err("path must be a string")
+    p = Path(path_str)
+    if not p.is_absolute():
+        return _err("path must be absolute (anti-traversal)")
+    # CWE-22: resolve symlinks/.. BEFORE the root check (raw startswith is bypassable
+    # via /Users/jp/Documents/GitHub/../<elsewhere>.md). is_relative_to on the resolved
+    # path is the correct anti-traversal guard (Inspecteur MOYEN V7 260612).
+    try:
+        resolved = p.resolve()
+    except OSError as e:
+        return _err(f"path resolution failed: {e}")
+    if not resolved.is_relative_to(INGEST_ALLOWED_ROOT):
+        return _err(f"path must be under {INGEST_ALLOWED_ROOT}")
+    p = resolved
+    if not p.exists():
+        return _err(f"file not found: {path_str}")
+    if p.suffix not in ALLOWED_INGEST_EXTENSIONS:
+        return _err(f"unsupported extension '{p.suffix}'. Allowed: {sorted(ALLOWED_INGEST_EXTENSIONS)}")
+    if p.stat().st_size > MAX_INGEST_FILE_BYTES:
+        return _err(f"file too large (>{MAX_INGEST_FILE_BYTES} bytes)")
+    collection = args.get("collection", "scotch")
+    if collection not in VALID_COLLECTIONS:
+        return _err(f"Invalid collection '{collection}'. Valid: {sorted(VALID_COLLECTIONS)}")
+    if collection in INGEST_BLOCKED_COLLECTIONS:
+        return _err(f"Collection '{collection}' is read-only (write forbidden)")
+    text = p.read_text(encoding="utf-8", errors="replace")
+    raw_chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
+    if not raw_chunks:
+        return _err("file produced no chunks after splitting")
+    canonical = str(p)  # resolved path = stable identity (anti dup-id, accurate source)
+    prefix = hashlib.md5(canonical.encode()).hexdigest()[:8]
+    ids = [f"{prefix}-{i}" for i in range(len(raw_chunks))]
+    metas = [{"source": canonical}] * len(raw_chunks)
+    rag_dir = _resolve_rag_dir()
+    try:
+        client = chromadb.PersistentClient(path=str(rag_dir))
+        col = client.get_or_create_collection(collection)
+        col.upsert(documents=raw_chunks, metadatas=metas, ids=ids)
+    except Exception as e:
+        return _err(f"ChromaDB error: {e}")
+    return {"ok": True, "chunks_added": len(raw_chunks), "collection": collection}
+
+
 _HANDLERS = {
     "boot_jiminy": boot_jiminy,
     "boot_beta_prime": boot_beta_prime,
@@ -498,6 +676,9 @@ _HANDLERS = {
     "scotch_query": scotch_query,
     "scotch_append": scotch_append,
     "scotch_rag_refresh": scotch_rag_refresh,
+    "rag_query": rag_query,
+    "rag_stats": rag_stats,
+    "rag_ingest": rag_ingest,
 }
 
 
@@ -515,5 +696,5 @@ MODULE = Module(
     name="mcp_scotch",
     tools=TOOLS,
     handle=handle,
-    profile_default=["boot_jiminy", "scotch_lint"],
+    profile_default=["boot_jiminy", "scotch_lint", "rag_query", "rag_stats"],
 )

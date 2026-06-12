@@ -10,7 +10,7 @@ from jps_mcp_scotch.modules.mcp_scotch import MODULE
 from jps_mcp_scotch.modules.mcp_scotch.tools import handle
 
 
-def test_module_exposes_9_tools_exact_set():
+def test_module_exposes_12_tools_exact_set():
     assert MODULE.name == "mcp_scotch"
     names = {t["name"] for t in MODULE.tools}
     assert names == {
@@ -20,6 +20,8 @@ def test_module_exposes_9_tools_exact_set():
         "scotch_query", "scotch_append", "scotch_rag_refresh",
         # V2 re-audit gap (260610): scotch_read générique
         "scotch_read",
+        # V7 RAG (260611): 3 tools rag_query/rag_stats/rag_ingest
+        "rag_query", "rag_stats", "rag_ingest",
     }
 
 
