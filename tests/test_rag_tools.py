@@ -319,3 +319,19 @@ def test_rag_ingest_wrong_extension(ephemeral_rag):
     result = rag_ingest({"path": str(bad)})
     assert "error" in result
     bad.unlink(missing_ok=True)
+
+
+def test_rag_ingest_traversal_startswith_bypass_blocked(ephemeral_rag, tmp_path: pathlib.Path):
+    """CWE-22: a path that string-prefix-matches the allowed root but resolves OUTSIDE
+    it (via ..) MUST be rejected. Regression for the raw-startswith bypass (Inspecteur
+    MOYEN V7 260612 — fixed via resolve()+is_relative_to)."""
+    # Real .md target outside the root, reached by traversing out of the allowed prefix.
+    outside = tmp_path / "secret.md"
+    outside.write_text("sensitive content that must not be ingested")
+    # Build a path that *starts with* the allowed root but escapes it after resolution.
+    up = "/".join([".."] * 12)
+    evil = f"/Users/jp/Documents/GitHub/{up}{outside}"
+    assert evil.startswith("/Users/jp/Documents/GitHub/")  # the bypass precondition
+    result = rag_ingest({"path": evil})
+    assert "error" in result
+    assert "under" in result["error"].lower()  # rejected by the root guard, not extension

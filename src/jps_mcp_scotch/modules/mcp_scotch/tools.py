@@ -627,8 +627,16 @@ def rag_ingest(args: Dict[str, Any]) -> Dict[str, Any]:
     p = Path(path_str)
     if not p.is_absolute():
         return _err("path must be absolute (anti-traversal)")
-    if not path_str.startswith(INGEST_ALLOWED_ROOT):
+    # CWE-22: resolve symlinks/.. BEFORE the root check (raw startswith is bypassable
+    # via /Users/jp/Documents/GitHub/../<elsewhere>.md). is_relative_to on the resolved
+    # path is the correct anti-traversal guard (Inspecteur MOYEN V7 260612).
+    try:
+        resolved = p.resolve()
+    except OSError as e:
+        return _err(f"path resolution failed: {e}")
+    if not resolved.is_relative_to(INGEST_ALLOWED_ROOT):
         return _err(f"path must be under {INGEST_ALLOWED_ROOT}")
+    p = resolved
     if not p.exists():
         return _err(f"file not found: {path_str}")
     if p.suffix not in ALLOWED_INGEST_EXTENSIONS:
@@ -644,9 +652,10 @@ def rag_ingest(args: Dict[str, Any]) -> Dict[str, Any]:
     raw_chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
     if not raw_chunks:
         return _err("file produced no chunks after splitting")
-    prefix = hashlib.md5(path_str.encode()).hexdigest()[:8]
+    canonical = str(p)  # resolved path = stable identity (anti dup-id, accurate source)
+    prefix = hashlib.md5(canonical.encode()).hexdigest()[:8]
     ids = [f"{prefix}-{i}" for i in range(len(raw_chunks))]
-    metas = [{"source": path_str}] * len(raw_chunks)
+    metas = [{"source": canonical}] * len(raw_chunks)
     rag_dir = _resolve_rag_dir()
     try:
         client = chromadb.PersistentClient(path=str(rag_dir))
