@@ -335,3 +335,15 @@ def test_rag_ingest_traversal_startswith_bypass_blocked(ephemeral_rag, tmp_path:
     result = rag_ingest({"path": evil})
     assert "error" in result
     assert "under" in result["error"].lower()  # rejected by the root guard, not extension
+
+
+# ── Robustesse import chromadb (fix 260612: except Exception, pas seulement ImportError) ──
+
+def test_rag_tools_degrade_cleanly_when_chromadb_unavailable(monkeypatch):
+    """chromadb cassé à l'import (ex pydantic ConfigError py3.14) → tools répondent
+    une erreur propre, AUCUNE exception ne remonte (le module reste sain)."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as t
+    monkeypatch.setattr(t, "chromadb", None)
+    for fn, args in ((t.rag_query, {"query": "x"}), (t.rag_stats, {}), (t.rag_ingest, {"text": "x", "source": "s"})):
+        out = fn(args)
+        assert isinstance(out, dict) and "error" in out and "chromadb" in out["error"]
