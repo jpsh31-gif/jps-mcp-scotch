@@ -344,6 +344,6 @@ def test_rag_tools_degrade_cleanly_when_chromadb_unavailable(monkeypatch):
     une erreur propre, AUCUNE exception ne remonte (le module reste sain)."""
     from jps_mcp_scotch.modules.mcp_scotch import tools as t
     monkeypatch.setattr(t, "chromadb", None)
-    for fn, args in ((t.rag_query, {"query": "x"}), (t.rag_stats, {}), (t.rag_ingest, {"text": "x", "source": "s"})):
+    for fn, args in ((t.rag_query, {"query": "x"}), (t.rag_stats, {}), (t.rag_ingest, {"path": "/tmp/whatever.md"})):
         out = fn(args)
         assert isinstance(out, dict) and "error" in out and "chromadb" in out["error"]
