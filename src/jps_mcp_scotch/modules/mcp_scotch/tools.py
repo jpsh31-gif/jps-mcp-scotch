@@ -597,8 +597,19 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     docs = results["documents"][0] if results.get("documents") else []
     metas = results["metadatas"][0] if results.get("metadatas") else []
     dists = results["distances"][0] if results.get("distances") else []
+    # Provenance: the 14 live collections were built by forge.rag / scotch_v6
+    # ingest which stores the file path under metadata key "path" (verified
+    # 260613: scotch/doctrine/skills metas = {size_bytes, path, lines}). Only
+    # rag_ingest (this module) writes "source". Read both, "source" first so
+    # rag_ingest-written chunks keep their key, falling back to "path" for the
+    # canonical store — otherwise every chunk returns an empty source (the bug
+    # the brief's "source/score" output requirement exposed).
     chunks = [
-        {"text": d, "source": m.get("source", ""), "score": round(1.0 - dist, 6)}
+        {
+            "text": d,
+            "source": (m or {}).get("source") or (m or {}).get("path", ""),
+            "score": round(1.0 - dist, 6),
+        }
         for d, m, dist in zip(docs, metas, dists)
     ]
     return {"ok": True, "results": chunks, "collection": collection, "k": k}
