@@ -114,6 +114,34 @@ def test_rag_query_happy_path(ephemeral_rag):
     assert isinstance(first["score"], float)
 
 
+def test_rag_query_source_from_source_key(ephemeral_rag):
+    """Regression (260613): chunk['source'] must carry the seeded metadata 'source'
+    value, not an empty string. The happy-path test only checked the key existed."""
+    result = rag_query({"query": "SCOTCH canonical memory"})
+    assert "error" not in result
+    assert result["results"][0]["source"] == _SEED_SOURCE
+
+
+def test_rag_query_source_falls_back_to_path_key(tmp_path, monkeypatch):
+    """Regression (260613): the 14 live collections store provenance under the
+    'path' metadata key (forge.rag / scotch_v6 ingest), NOT 'source'. rag_query
+    must surface it. Before the fix m.get('source','') always returned '' for
+    every real chunk."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    client = chromadb.PersistentClient(path=str(rag_dir))
+    col = client.get_or_create_collection("scotch")
+    col.add(
+        documents=["chunk built like the real store"],
+        metadatas=[{"path": "/Users/jp/Documents/GitHub/jps-scotch/scotch/FONDATIONS.md", "lines": 10}],
+        ids=["path-chunk-0"],
+    )
+    result = rag_query({"query": "real store"})
+    assert "error" not in result
+    assert result["results"][0]["source"].endswith("FONDATIONS.md")
+
+
 def test_rag_query_default_collection_is_scotch(ephemeral_rag):
     """Default collection 'scotch' used when collection param omitted."""
     result = rag_query({"query": "canonical"})
