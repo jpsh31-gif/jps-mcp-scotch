@@ -1,7 +1,7 @@
 """mcp_scotch tools — 9 subprocess wrappers scotch_v6.py CLI + 3 direct chromadb RAG tools.
 
 Source canonique: /Users/jp/Documents/GitHub/jps-scotch/tools/scotch_v6.py
-(shebang python3.13, chromadb 1.5.0, RAG 45286 chunks 5 collections).
+(shebang python3.13, chromadb 1.5.0, RAG ~52k chunks 14 collections — 5 agent + 8 vault_* + patrimoine, exposées 260628).
 
 Doctrine:
   - jps-scotch/ INTOUCHABLE — wrappers subprocess only, zero direct fs writes
@@ -47,9 +47,21 @@ MAX_TOP_K = 100  # borne sup top_k (anti memory-exhaustion RAG — Inspecteur MI
 # rag-refresh = ingest embeddings, lent → timeout généreux (override DEFAULT_TIMEOUT_S 60s).
 RAG_REFRESH_TIMEOUT_S = 600
 
-# RAG tool constants (V7 RAG 260612)
-VALID_COLLECTIONS = {"scotch", "history", "doctrine", "skills", "mvp0_legacy"}
+# RAG tool constants (V7 RAG 260612 ; vault_* exposés 260628 — dette MCP soldée)
+# Les 14 collections vivantes du store scotch/rag (rag_stats live 260628). Avant 260628 l'enum
+# n'exposait que 5 collections → 8 vault_* + patrimoine + vault étaient AVEUGLES au MCP
+# (cause du "Cowork RAG renvoie vide" sur le perso/pro migré). Décision BP 260628 : exposer les
+# vault_*. Source unique de vérité ci-dessous → enums inputSchema dérivés (sorted) pour éviter
+# la triple-maintenance qui a causé le drift.
+VALID_COLLECTIONS = {
+    "scotch", "history", "doctrine", "skills", "mvp0_legacy",
+    "vault_pro", "vault_prive", "vault_admin", "vault_maison",
+    "vault_notices", "vault_cuisine", "vault_outdoor", "patrimoine", "vault",
+}
 INGEST_BLOCKED_COLLECTIONS = {"mvp0_legacy"}
+# Enums JSON-schema dérivés du set canonique (DRY — pas de liste recopiée à maintenir).
+_QUERY_COLLECTION_ENUM = sorted(VALID_COLLECTIONS)
+_INGEST_COLLECTION_ENUM = sorted(VALID_COLLECTIONS - INGEST_BLOCKED_COLLECTIONS)
 ALLOWED_INGEST_EXTENSIONS = {".md", ".txt"}
 INGEST_ALLOWED_ROOT = "/Users/jp/Documents/GitHub/"
 MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -360,8 +372,8 @@ TOOLS: List[Dict[str, Any]] = [
                 },
                 "collection": {
                     "type": "string",
-                    "enum": ["scotch", "history", "doctrine", "skills", "mvp0_legacy"],
-                    "description": "ChromaDB collection to query (default: scotch).",
+                    "enum": _QUERY_COLLECTION_ENUM,
+                    "description": "ChromaDB collection to query (default: scotch). vault_* = mémoire perso/pro migrée.",
                     "default": "scotch",
                 },
             },
@@ -393,8 +405,8 @@ TOOLS: List[Dict[str, Any]] = [
                 },
                 "collection": {
                     "type": "string",
-                    "enum": ["scotch", "history", "doctrine", "skills"],
-                    "description": "Target collection (default: scotch).",
+                    "enum": _INGEST_COLLECTION_ENUM,
+                    "description": "Target collection (default: scotch). vault_* writable; mvp0_legacy read-only.",
                     "default": "scotch",
                 },
             },
