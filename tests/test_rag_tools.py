@@ -214,6 +214,34 @@ def test_rag_query_valid_collections_accepted(ephemeral_rag):
             )
 
 
+def test_rag_query_vault_collections_accepted(ephemeral_rag):
+    """vault_* + patrimoine + vault accepted (dette MCP soldée 260628)."""
+    for col in [
+        "vault_pro", "vault_prive", "vault_admin", "vault_maison",
+        "vault_notices", "vault_cuisine", "vault_outdoor", "patrimoine", "vault",
+    ]:
+        result = rag_query({"query": "test", "collection": col})
+        if "error" in result:
+            assert "invalid collection" not in result["error"].lower(), (
+                f"Collection '{col}' incorrectly rejected: {result['error']}"
+            )
+
+
+def test_rag_collection_enums_derived_from_valid_set():
+    """Enums inputSchema dérivés du set canonique (DRY anti-drift 260628)."""
+    from jps_mcp_scotch.modules.mcp_scotch.tools import (
+        VALID_COLLECTIONS,
+        INGEST_BLOCKED_COLLECTIONS,
+        _QUERY_COLLECTION_ENUM,
+        _INGEST_COLLECTION_ENUM,
+    )
+    assert set(_QUERY_COLLECTION_ENUM) == VALID_COLLECTIONS
+    assert set(_INGEST_COLLECTION_ENUM) == VALID_COLLECTIONS - INGEST_BLOCKED_COLLECTIONS
+    assert "vault_pro" in _QUERY_COLLECTION_ENUM
+    assert "vault_pro" in _INGEST_COLLECTION_ENUM
+    assert "mvp0_legacy" not in _INGEST_COLLECTION_ENUM
+
+
 # ── rag_stats tests ────────────────────────────────────────────────────────────
 
 
