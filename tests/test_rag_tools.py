@@ -49,20 +49,15 @@ def ephemeral_rag(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def tmp_md_file(tmp_path: pathlib.Path) -> pathlib.Path:
-    """Small .md file under /Users/jp/Documents/GitHub/ (simulated via real subpath)."""
-    # Must be absolute + under /Users/jp/Documents/GitHub/
-    # We create a real temp dir under that path prefix using a symlink trick — but
-    # the brief says "path absolu sous /Users/jp/Documents/GitHub/ uniquement".
-    # To keep tests self-contained, we create the file at a real path the guard accepts.
-    safe_dir = pathlib.Path("/Users/jp/Documents/GitHub") / "jps-mcp-scotch" / "tests" / "_tmp_ingest_fixture"
-    safe_dir.mkdir(parents=True, exist_ok=True)
-    md = safe_dir / "fixture_ingest_test.md"
+def tmp_md_file(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+    """Small .md file under an EPHEMERAL ingest root (machine-indépendant, vitrine 260703).
+    L'ancienne fixture écrivait un vrai fichier sous ~/Documents/GitHub/ (path machine-specific
+    ET symlinké post-migration → le guard realpath refusait tout). JPS_INGEST_ROOT pointe le
+    tmp_path du test : zéro dépendance à la machine, zéro écriture hors sandbox pytest."""
+    monkeypatch.setenv("JPS_INGEST_ROOT", str(tmp_path))
+    md = tmp_path / "fixture_ingest_test.md"
     md.write_text("# Test heading\n\nContent for ephemeral RAG ingest test.\n")
     yield md
-    # cleanup
-    if md.exists():
-        md.unlink()
 
 
 # ── MODULE tool list ───────────────────────────────────────────────────────────

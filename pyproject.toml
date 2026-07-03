@@ -9,7 +9,7 @@ description = "JPS MCP Scotch — scotch_v6.py subprocess wrappers (Phase 2B.5)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-authors = [{ name = "JPS / Beta-Prime / Jim", email = "jp.sh31@gmail.com" }]
+authors = [{ name = "JPS / Beta-Prime / Jim" }]
 dependencies = [
     "jps-mcp >= 0.1.0",
     "chromadb >= 1.5.0",
