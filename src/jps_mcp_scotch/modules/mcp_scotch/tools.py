@@ -1,6 +1,6 @@
 """mcp_scotch tools — 9 subprocess wrappers scotch_v6.py CLI + 3 direct chromadb RAG tools.
 
-Source canonique: /Users/jp/Documents/GitHub/jps-scotch/tools/scotch_v6.py
+Source canonique: <GH_ROOT>/jps-scotch/tools/scotch_v6.py (sibling repo jps-scotch)
 (shebang python3.13, chromadb 1.5.0, RAG ~52k chunks 14 collections — 5 agent + 8 vault_* + patrimoine, exposées 260628).
 
 Doctrine:
@@ -63,7 +63,16 @@ INGEST_BLOCKED_COLLECTIONS = {"mvp0_legacy"}
 _QUERY_COLLECTION_ENUM = sorted(VALID_COLLECTIONS)
 _INGEST_COLLECTION_ENUM = sorted(VALID_COLLECTIONS - INGEST_BLOCKED_COLLECTIONS)
 ALLOWED_INGEST_EXTENSIONS = {".md", ".txt"}
-INGEST_ALLOWED_ROOT = "/Users/jp/Documents/GitHub/"
+# Racine autorisée pour l'ingestion — env JPS_INGEST_ROOT surchargable (tests, autre machine).
+# Défaut = tree RÉEL post-migration 260701. Le check résout le root ET le path candidat en
+# realpath : ~/Documents/GitHub/<repo> sont des SYMLINKS vers ~/GitHub/<repo> — comparer un
+# path résolu à un root littéral non-résolu refusait TOUT (3 tests rouges, brief VITRINE 260703).
+_DEFAULT_INGEST_ROOT = "/Users/jp/GitHub/"
+
+
+def _ingest_root() -> Path:
+    """Racine d'ingestion vivante (env lue au call — testable, machine-indépendante)."""
+    return Path(os.environ.get("JPS_INGEST_ROOT", _DEFAULT_INGEST_ROOT))
 MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
@@ -393,7 +402,7 @@ TOOLS: List[Dict[str, Any]] = [
         "name": "rag_ingest",
         "description": (
             "Ingest a .md or .txt file into a ChromaDB collection. "
-            "File must be under /Users/jp/Documents/GitHub/. "
+            "File must be under the allowed ingest root (env JPS_INGEST_ROOT). "
             "mvp0_legacy is read-only and cannot be ingested into."
         ),
         "inputSchema": {
@@ -401,7 +410,7 @@ TOOLS: List[Dict[str, Any]] = [
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Absolute path to file to ingest (must be under /Users/jp/Documents/GitHub/).",
+                    "description": "Absolute path to file to ingest (must be under the allowed ingest root, env JPS_INGEST_ROOT).",
                 },
                 "collection": {
                     "type": "string",
@@ -657,10 +666,11 @@ def rag_ingest(args: Dict[str, Any]) -> Dict[str, Any]:
     # path is the correct anti-traversal guard (Inspecteur MOYEN V7 260612).
     try:
         resolved = p.resolve()
+        allowed_root = _ingest_root().resolve()
     except OSError as e:
         return _err(f"path resolution failed: {e}")
-    if not resolved.is_relative_to(INGEST_ALLOWED_ROOT):
-        return _err(f"path must be under {INGEST_ALLOWED_ROOT}")
+    if not resolved.is_relative_to(allowed_root):
+        return _err(f"path must be under {_ingest_root()}")
     p = resolved
     if not p.exists():
         return _err(f"file not found: {path_str}")
