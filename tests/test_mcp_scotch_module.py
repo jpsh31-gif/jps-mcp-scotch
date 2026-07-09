@@ -89,6 +89,24 @@ def test_boot_beta_prime_with_minimal_budget(monkeypatch, tmp_path):
     assert "minimal" in captured["cmd"]
 
 
+def test_boot_beta_prime_embeds_workspace_boot_fallback(monkeypatch, tmp_path):
+    import jps_mcp_scotch.modules.mcp_scotch.tools as t
+    cli = tmp_path / "tools" / "scotch_v6.py"
+    cli.parent.mkdir(parents=True, exist_ok=True)
+    cli.write_text("", encoding="utf-8")
+    monkeypatch.setenv("JPS_SCOTCH_DIR", str(tmp_path))
+    monkeypatch.setattr(t.subprocess, "run", _make_fake_run_ok("boot ok\n"))
+
+    res = handle("boot_beta_prime", {"budget": "normal"})
+    fallback = res["workspace_boot_fallback"]
+    assert fallback["available"] is True
+    assert {"bp", "jim", "idel", "patrimoine", "secretaire", "icompta"}.issubset(
+        set(fallback["aliases"])
+    )
+    assert fallback["packs"]["bp"]["workspace"] == "bp-workspace"
+    assert fallback["packs"]["secretaire"]["cloud_policy"]["content_included"] is False
+
+
 def test_boot_dispatch_default_budget(monkeypatch, tmp_path):
     import jps_mcp_scotch.modules.mcp_scotch.tools as t
     cli = tmp_path / "tools" / "scotch_v6.py"

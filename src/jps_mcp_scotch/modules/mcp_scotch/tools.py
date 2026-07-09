@@ -46,6 +46,7 @@ DEFAULT_TOP_K = 5
 MAX_TOP_K = 100  # borne sup top_k (anti memory-exhaustion RAG — Inspecteur MINEUR-2 260610)
 # rag-refresh = ingest embeddings, lent → timeout généreux (override DEFAULT_TIMEOUT_S 60s).
 RAG_REFRESH_TIMEOUT_S = 600
+WORKSPACE_BOOT_FALLBACK_ALIASES = ("bp", "jim", "idel", "patrimoine", "secretaire", "icompta")
 
 # RAG tool constants (V7 RAG 260612 ; vault_* exposés 260628 — dette MCP soldée)
 # Les 14 collections vivantes du store scotch/rag (rag_stats live 260628). Avant 260628 l'enum
@@ -442,11 +443,71 @@ def _boot_agent(agent: str, args: Dict[str, Any]) -> Dict[str, Any]:
     res = _run_cli(["boot", agent, "--budget", budget])
     if "error" in res:
         return res
-    return {
+    payload = {
         "ok": True,
         "agent": agent,
         "budget": budget,
         "context": res["stdout"],
+    }
+    payload["workspace_boot_fallback"] = _workspace_boot_fallback(agent)
+    return payload
+
+
+def _workspace_boot_fallback(agent: str) -> Dict[str, Any]:
+    """Embed compact workspace boot packs into existing boot_* tools.
+
+    ChatGPT can cache the tool list for a connector and temporarily miss a newly
+    added tool such as workspace_boot. Keeping this as data inside already-visible
+    boot_* calls gives GPT a safe fallback without increasing the exposed tool set.
+    """
+    if agent != "beta_prime":
+        aliases = ("jim",)
+    else:
+        aliases = WORKSPACE_BOOT_FALLBACK_ALIASES
+    try:
+        from jps_mcp.modules.jps_boot.tools import workspace_boot
+    except Exception as e:  # pragma: no cover - defensive when sibling core is absent
+        return {"available": False, "error": f"workspace_boot import failed: {e}"}
+
+    packs: Dict[str, Any] = {}
+    for alias in aliases:
+        pack = workspace_boot({"workspace": alias, "include_content": False})
+        if "error" in pack:
+            packs[alias] = pack
+            continue
+        packs[alias] = {
+            "workspace": pack.get("workspace"),
+            "path": pack.get("path"),
+            "exists": pack.get("exists"),
+            "role": pack.get("role"),
+            "summary": pack.get("summary"),
+            "sensitivity": pack.get("sensitivity"),
+            "cloud_policy": pack.get("cloud_policy"),
+            "scotch": {
+                "agent": pack.get("scotch", {}).get("agent"),
+                "recommended_tool": pack.get("scotch", {}).get("recommended_tool"),
+            },
+            "git": pack.get("git"),
+            "entrypoints": pack.get("entrypoints"),
+            "inboxes": {
+                name: {
+                    "path": inbox.get("path"),
+                    "exists": inbox.get("exists"),
+                    "count": inbox.get("count"),
+                    "files": inbox.get("files"),
+                }
+                for name, inbox in pack.get("inboxes", {}).items()
+            },
+        }
+
+    return {
+        "available": True,
+        "reason": (
+            "Fallback for ChatGPT sessions whose cached tool schema does not yet expose "
+            "workspace_boot. Prefer the workspace_boot tool when it is visible."
+        ),
+        "aliases": list(aliases),
+        "packs": packs,
     }
 
 
