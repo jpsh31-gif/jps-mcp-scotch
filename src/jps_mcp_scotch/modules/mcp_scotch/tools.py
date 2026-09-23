@@ -64,16 +64,31 @@ INGEST_BLOCKED_COLLECTIONS = {"mvp0_legacy"}
 _QUERY_COLLECTION_ENUM = sorted(VALID_COLLECTIONS)
 _INGEST_COLLECTION_ENUM = sorted(VALID_COLLECTIONS - INGEST_BLOCKED_COLLECTIONS)
 ALLOWED_INGEST_EXTENSIONS = {".md", ".txt"}
-# Racine autorisée pour l'ingestion — env JPS_INGEST_ROOT surchargable (tests, autre machine).
-# Défaut = tree RÉEL post-migration 260701. Le check résout le root ET le path candidat en
-# realpath : ~/Documents/GitHub/<repo> sont des SYMLINKS vers ~/GitHub/<repo> — comparer un
-# path résolu à un root littéral non-résolu refusait TOUT (3 tests rouges, brief VITRINE 260703).
-_DEFAULT_INGEST_ROOT = "/Users/jp/GitHub/"
+# Racines autorisées pour l'ingestion — env JPS_INGEST_ROOTS (liste ":"-séparée) surchargable
+# (tests, autre machine). Défaut = tree GitHub (post-migration 260701) + Dropbox perso (décision
+# JP 260923 : la restriction à /Users/jp/GitHub/ était temporaire, le temps de valider le canal
+# local d'ingestion RAG ; une fois validé — cf ingestion reports/ patrimoine-workspace 260923 —
+# JP a demandé l'ouverture explicite à d'autres racines de données, Dropbox en premier). Le check
+# résout CHAQUE root ET le path candidat en realpath : ~/Documents/GitHub/<repo> sont des SYMLINKS
+# vers ~/GitHub/<repo> — comparer un path résolu à un root littéral non-résolu refusait TOUT
+# (3 tests rouges, brief VITRINE 260703).
+_DEFAULT_INGEST_ROOTS = (
+    "/Users/jp/GitHub/",
+    "/Users/jp/Library/CloudStorage/Dropbox/PERSO/",
+)
+
+
+def _ingest_roots() -> list[Path]:
+    """Racines d'ingestion vivantes (env lue au call — testable, machine-indépendante)."""
+    raw = os.environ.get("JPS_INGEST_ROOTS") or os.environ.get("JPS_INGEST_ROOT")
+    if raw:
+        return [Path(p) for p in raw.split(":") if p]
+    return [Path(p) for p in _DEFAULT_INGEST_ROOTS]
 
 
 def _ingest_root() -> Path:
-    """Racine d'ingestion vivante (env lue au call — testable, machine-indépendante)."""
-    return Path(os.environ.get("JPS_INGEST_ROOT", _DEFAULT_INGEST_ROOT))
+    """Compat rétro (messages d'erreur, tests existants) : première racine active."""
+    return _ingest_roots()[0]
 MAX_INGEST_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
@@ -727,11 +742,11 @@ def rag_ingest(args: Dict[str, Any]) -> Dict[str, Any]:
     # path is the correct anti-traversal guard (Inspecteur MOYEN V7 260612).
     try:
         resolved = p.resolve()
-        allowed_root = _ingest_root().resolve()
+        allowed_roots = [r.resolve() for r in _ingest_roots()]
     except OSError as e:
         return _err(f"path resolution failed: {e}")
-    if not resolved.is_relative_to(allowed_root):
-        return _err(f"path must be under {_ingest_root()}")
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        return _err(f"path must be under one of {[str(r) for r in _ingest_roots()]}")
     p = resolved
     if not p.exists():
         return _err(f"file not found: {path_str}")
