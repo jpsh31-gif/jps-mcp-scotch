@@ -30,6 +30,18 @@ _SEED_TEXT = "SCOTCH canonical memory test chunk for ephemeral RAG."
 _SEED_SOURCE = "tests/fixture_seed.md"
 
 
+@pytest.mark.parametrize("path,expected", [
+    ("current/ARCHIVE_FORMAT.md", "present"),
+    ("archive/guide.md", "historique"),
+    ("ARCHIVES/guide.md", "historique"),
+    ("shared/CLAIMS_SNAPSHOT_PRE_RECONCILIATION.md", "historique"),
+    ("current/snapshot_api.md", "present"),
+])
+def test_temporalite_path_segments(path, expected):
+    from jps_mcp_scotch.modules.mcp_scotch.tools import _temporalite
+    assert _temporalite(path) == expected
+
+
 @pytest.fixture()
 def ephemeral_rag(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     """Create ephemeral chroma at tmp_path/rag, seed 'scotch' collection, patch env."""
@@ -398,3 +410,22 @@ def test_rag_tools_degrade_cleanly_when_chromadb_unavailable(monkeypatch):
     for fn, args in ((t.rag_query, {"query": "x"}), (t.rag_stats, {}), (t.rag_ingest, {"path": "/tmp/whatever.md"})):
         out = fn(args)
         assert isinstance(out, dict) and "error" in out and "chromadb" in out["error"]
+
+
+def test_rag_query_present_avant_historique(tmp_path, monkeypatch):
+    """Présent prioritaire : un checkpoint/archive ne passe jamais devant un doc courant
+    et reste étiqueté historique (audit 260927)."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+    hist = "/Users/jp/GitHub/jps-scotch/scotch/beta_prime/checkpoints/CP_260609_1.md"
+    col.add(
+        documents=["serveur MCP port 8765 architecture mvp0"] * 3 + ["serveur MCP architecture actuelle jps-mcp"],
+        metadatas=[{"path": hist.replace("_1", f"_{i}")} for i in range(3)]
+        + [{"path": "/Users/jp/GitHub/jps-scotch/vault/shared/ecosystem/guides/jps-mcp_GUIDE.md"}],
+        ids=["h0", "h1", "h2", "p0"],
+    )
+    res = rag_query({"query": "serveur MCP port 8765 architecture mvp0", "k": 3})["results"]
+    assert res[0]["temporalite"] == "present" and res[0]["source"].endswith("jps-mcp_GUIDE.md")
+    assert [r["temporalite"] for r in res[1:]] == ["historique", "historique"]

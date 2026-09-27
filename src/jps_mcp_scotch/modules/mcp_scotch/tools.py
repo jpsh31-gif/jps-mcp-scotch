@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -653,6 +654,19 @@ def scotch_rag_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "dry_run": dry_run, "stdout": res["stdout"]}
 
 
+# Présent vs historique (audit 260927) : ~95 % de la collection scotch sont des checkpoints datés.
+# Un chemin d'historique ne passe jamais devant un document courant ; il reste lisible, étiqueté.
+# ⚠ Même règle côté jps-scotch tools/forge/rag (retrieve_context) — garder synchronisé.
+_HISTORIQUE_RE = re.compile(
+    r"(?:^|/)(?:checkpoints|_?archives?|governance)/|"
+    r"(?:^|/)(?:[^/]*_(?:archive|snapshot)(?:_|\.)|semaine_|t1_week)", re.IGNORECASE
+)
+
+
+def _temporalite(source: str) -> str:
+    return "historique" if _HISTORIQUE_RE.search(source or "") else "present"
+
+
 def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     if chromadb is None:
         return _err("chromadb not installed")
@@ -673,7 +687,8 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         client = chromadb.PersistentClient(path=str(rag_dir))
         col = client.get_collection(collection)
-        results = col.query(query_texts=[query], n_results=k)
+        # Sur-échantillonnage : laisse aux documents courants la place de passer devant.
+        results = col.query(query_texts=[query], n_results=min(k * 4, max(col.count(), 1)))
     except Exception as e:
         return _err(f"ChromaDB error: {e}")
     docs = results["documents"][0] if results.get("documents") else []
@@ -694,6 +709,10 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
         }
         for d, m, dist in zip(docs, metas, dists)
     ]
+    for c in chunks:
+        c["temporalite"] = _temporalite(c["source"])
+    # Tri stable : présent d'abord (ordre de pertinence conservé), historique ensuite.
+    chunks = sorted(chunks, key=lambda c: c["temporalite"] != "present")[:k]
     return {"ok": True, "results": chunks, "collection": collection, "k": k}
 
 
