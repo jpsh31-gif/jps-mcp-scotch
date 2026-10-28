@@ -887,6 +887,149 @@ def test_open_rag_client_survives_missing_or_failing_cache_api(tmp_path, monkeyp
     assert tools_mod._open_rag_client(tmp_path) is not None
 
 
+def _patch_clear_outcomes(monkeypatch, outcomes, default="ok"):
+    """clear_system_cache : une issue par appel ('ok' ou 'boom'), puis `default`. Renvoie la liste des appels."""
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    seq = iter(outcomes)
+    calls = []
+
+    def fake(cls):
+        calls.append(1)
+        if next(seq, default) == "boom":
+            raise RuntimeError("vidage transitoire")
+
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(fake))
+    return calls
+
+
+def test_h2_retry_transient_clear_failure_is_retried_on_next_request(tmp_path, monkeypatch):
+    """H2 retry T1 : 10 -> 11 (vidage lève) -> 11 (vidage réussit) : 2 tentatives, la 2e à la 3e requête ; la 4e et 5e ne vident plus."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, ["boom", "ok"])
+    _patch_store_signatures(monkeypatch, tools_mod, [10, 11, 11, 11, 11])
+
+    counts = []
+    for _ in range(5):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+        counts.append(len(calls))
+    assert counts == [0, 1, 2, 2, 2]
+
+
+def test_h2_retry_stable_marker_never_clears(tmp_path, monkeypatch):
+    """H2 retry T2 (non-régression) : signature stable sur 20 lectures : zéro vidage."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [])
+    _patch_store_signatures(monkeypatch, tools_mod, [7] * 20)
+
+    for _ in range(20):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+    assert calls == []
+
+
+def test_h2_retry_empty_store_zero_is_not_cleared_on_first_pass(tmp_path, monkeypatch):
+    """H2 retry T3 (non-régression) : store vide (0 lu avec succès) : pas de vidage, 0 mémorisé."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [])
+    _patch_store_signatures(monkeypatch, tools_mod, [0, 0, 0])
+
+    for _ in range(3):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+    assert calls == []
+    assert tools_mod._RAG_STORE_SIGNATURES[str(tmp_path)] == 0
+
+
+def test_h2_retry_unreadable_marker_keeps_previous_signature(tmp_path, monkeypatch):
+    """H2 retry T4 (non-régression) : signature None (illisible) : jamais de vidage, signature précédente conservée."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [])
+    _patch_store_signatures(monkeypatch, tools_mod, [5, None, None, None])
+
+    for _ in range(4):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+    assert calls == []
+    assert tools_mod._RAG_STORE_SIGNATURES[str(tmp_path)] == 5
+
+
+@pytest.mark.parametrize("variant", ["attribut_absent", "import_impossible"])
+def test_h2_retry_absent_cache_api_acks_at_once_without_retry(tmp_path, monkeypatch, variant):
+    """H2 retry T5 : API absente (attribut supprimé ou ImportError) : pas d'exception, signature acquittée immédiatement."""
+    import sys
+
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    if variant == "attribut_absent":
+        monkeypatch.delattr(SharedSystemClient, "clear_system_cache")
+    else:
+        monkeypatch.setitem(sys.modules, "chromadb.api.shared_system_client", None)
+    _patch_store_signatures(monkeypatch, tools_mod, [1, 2, 2, 2])
+
+    stored = []
+    for _ in range(4):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+        stored.append(tools_mod._RAG_STORE_SIGNATURES.get(str(tmp_path)))
+    assert stored == [1, 2, 2, 2]
+
+
+def test_h2_retry_persistent_failure_is_bounded_to_three_attempts(tmp_path, monkeypatch):
+    """H2 retry T6 : échec persistant : au plus 3 tentatives pour la même signature, puis acquittement ; jamais un vidage à chaque requête."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [], default="boom")
+    _patch_store_signatures(monkeypatch, tools_mod, [10] + [11] * 10)
+
+    counts = []
+    for _ in range(11):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+        counts.append(len(calls))
+    assert counts == [0, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3]
+    assert tools_mod._RAG_STORE_SIGNATURES[str(tmp_path)] == 11
+
+
+def test_h2_retry_concurrent_threads_clear_exactly_once(tmp_path, monkeypatch):
+    """H2 retry T7 : 8 threads, même nouvelle signature, vidage qui réussit : exactement un vidage, aucune exception."""
+    import threading
+
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [])
+    state = {"sig": 10}
+    monkeypatch.setattr(tools_mod, "_rag_store_signature", lambda rag_dir: state["sig"])
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: object())
+    assert tools_mod._open_rag_client(tmp_path) is not None
+    state["sig"] = 11
+
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def worker():
+        try:
+            barrier.wait()
+            assert tools_mod._open_rag_client(tmp_path) is not None
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert calls == [1]
+
+
 def test_rag_store_signature_reads_max_seq_id_and_none_on_error(tmp_path):
     """H2 : marqueur réel = MAX(seq_id) de embeddings_queue ; None si fichier ou table absents."""
     import sqlite3

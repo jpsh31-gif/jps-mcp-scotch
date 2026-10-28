@@ -20,7 +20,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 try:
     import chromadb  # type: ignore[import]
@@ -159,6 +159,8 @@ def _resolve_rag_dir() -> Path:
 
 
 _RAG_STORE_SIGNATURES: Dict[str, Any] = {}
+_RAG_CLEAR_ATTEMPTS: Dict[str, Tuple[Any, int]] = {}  # clé -> (signature, échecs consécutifs de vidage)
+_RAG_CLEAR_MAX_ATTEMPTS = 3
 _RAG_STORE_LOCK = threading.Lock()
 
 
@@ -182,6 +184,32 @@ def _rag_store_signature(rag_dir: Path) -> Any:
         conn.close()
 
 
+def _vider_cache_rag(key: str, signature: int) -> bool:
+    """Vide le cache Chroma partagé pour une nouvelle signature ; True = signature acquittée.
+
+    Acquittée : vidage réussi, API absente (définitif) ou borne de tentatives atteinte.
+    Échec transitoire : False, la signature reste à réessayer à la requête suivante.
+    Appelée uniquement sous _RAG_STORE_LOCK.
+    """
+    try:
+        from chromadb.api.shared_system_client import SharedSystemClient
+        vider = SharedSystemClient.clear_system_cache
+    except (ImportError, AttributeError):
+        _RAG_CLEAR_ATTEMPTS.pop(key, None)
+        return True
+    precedent = _RAG_CLEAR_ATTEMPTS.get(key)
+    echecs = precedent[1] if precedent and precedent[0] == signature else 0
+    try:
+        vider()
+    except Exception:  # noqa: BLE001
+        echecs += 1
+        if echecs < _RAG_CLEAR_MAX_ATTEMPTS:
+            _RAG_CLEAR_ATTEMPTS[key] = (signature, echecs)
+            return False
+    _RAG_CLEAR_ATTEMPTS.pop(key, None)
+    return True
+
+
 def _open_rag_client(rag_dir: Path) -> Any:
     """Ouvre le client Chroma ; si le store a changé depuis la dernière vue, vide le cache partagé (H2).
 
@@ -193,13 +221,10 @@ def _open_rag_client(rag_dir: Path) -> Any:
     with _RAG_STORE_LOCK:
         if isinstance(signature, int):
             previous = _RAG_STORE_SIGNATURES.get(key)
-            if isinstance(previous, int) and previous != signature:
-                try:
-                    from chromadb.api.shared_system_client import SharedSystemClient
-                    SharedSystemClient.clear_system_cache()
-                except Exception:  # noqa: BLE001
-                    pass
-            _RAG_STORE_SIGNATURES[key] = signature
+            if not isinstance(previous, int) or previous == signature:
+                _RAG_STORE_SIGNATURES[key] = signature
+            elif _vider_cache_rag(key, signature):
+                _RAG_STORE_SIGNATURES[key] = signature
     return chromadb.PersistentClient(path=str(rag_dir))
 
 
