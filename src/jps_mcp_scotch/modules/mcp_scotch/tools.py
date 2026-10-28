@@ -755,10 +755,12 @@ def _lexical_complement(col: Any, question: str, rows: list, k: int) -> list:
 
                 meta = r_metas[i] if i < len(r_metas) else {}
                 source = (meta or {}).get("source") or (meta or {}).get("path", "")
-                if _temporalite(source) != "present":
+                if not source or _temporalite(source) != "present":
                     continue
 
-                dist = float(r_dists[i]) if i < len(r_dists) else 0.0
+                if i >= len(r_dists):
+                    continue
+                dist = float(r_dists[i])
                 if dist > ceiling:
                     continue
 

@@ -709,3 +709,41 @@ def test_rag_query_lexical_cle_presente_seulement_sur_ajouts(monkeypatch):
     assert "lexical" not in chunks[1]
     assert all("lexical" not in c for c in chunks[1:])
 
+
+
+class _StubCol:
+    """Collection minimale pour _lexical_complement : un terme rare, un seul résultat lexical."""
+
+    def __init__(self, meta, dist_list):
+        self._meta, self._dist = meta, dist_list
+
+    def get(self, **kwargs):
+        return {"ids": ["x"]}
+
+    def query(self, **kwargs):
+        return {"ids": [["lex"]], "documents": [["doc"]], "metadatas": [[self._meta]],
+                "distances": [self._dist]}
+
+
+def _pool_sature():
+    meta = {"path": "/x/checkpoints/CP_1.md"}
+    return [("d", meta, 0.4, "h1")]
+
+
+def test_lexical_complement_distance_absente_ignoree():
+    from jps_mcp_scotch.modules.mcp_scotch import tools as t
+    col = _StubCol({"path": "/x/vault/guide.md"}, [])
+    assert t._lexical_complement(col, "guides rares", _pool_sature(), 5) == []
+
+
+def test_lexical_complement_source_vide_ignoree():
+    from jps_mcp_scotch.modules.mcp_scotch import tools as t
+    col = _StubCol(None, [0.45])
+    assert t._lexical_complement(col, "guides rares", _pool_sature(), 5) == []
+
+
+def test_lexical_complement_nominal_et_garde_de_distance():
+    from jps_mcp_scotch.modules.mcp_scotch import tools as t
+    ok = t._lexical_complement(_StubCol({"path": "/x/vault/guide.md"}, [0.45]), "guides rares", _pool_sature(), 5)
+    far = t._lexical_complement(_StubCol({"path": "/x/vault/guide.md"}, [0.9]), "guides rares", _pool_sature(), 5)
+    assert [r[0] for r in ok] == ["doc"] and far == []
