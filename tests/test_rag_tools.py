@@ -1030,6 +1030,79 @@ def test_h2_retry_concurrent_threads_clear_exactly_once(tmp_path, monkeypatch):
     assert calls == [1]
 
 
+class _CacheApiEnPanne:
+    """Descripteur dont la lecture de clear_system_cache lève une erreur autre qu'ImportError/AttributeError."""
+
+    def __get__(self, obj, owner):
+        raise RuntimeError("descripteur en panne")
+
+
+def test_h2_retry_unexpected_error_reading_cache_api_is_not_propagated(tmp_path, monkeypatch):
+    """H2 retry Inspecteur 1 : RuntimeError à la lecture de l'API de cache = échec transitoire, requête servie."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", _CacheApiEnPanne())
+    _patch_store_signatures(monkeypatch, tools_mod, [10, 11])
+
+    assert tools_mod._open_rag_client(tmp_path) is not None
+    assert tools_mod._open_rag_client(tmp_path) is not None
+    assert tools_mod._RAG_STORE_SIGNATURES[str(tmp_path)] == 10
+
+
+def test_h2_retry_counter_resets_when_previous_signature_returns(tmp_path, monkeypatch):
+    """H2 retry Inspecteur 2 : 10 -> 11 (échec) -> 10 -> 11 (échec, échec, échec) : le compteur repart de 0 au retour à 11."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [], default="boom")
+    _patch_store_signatures(monkeypatch, tools_mod, [10, 11, 10, 11, 11, 11, 11])
+
+    counts = []
+    for _ in range(7):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+        counts.append(len(calls))
+    assert counts == [0, 1, 1, 2, 3, 4, 4]
+    assert tools_mod._RAG_STORE_SIGNATURES[str(tmp_path)] == 11
+
+
+def test_h2_retry_abandon_after_three_failures_logs_one_warning(tmp_path, monkeypatch, caplog):
+    """H2 retry Inspecteur 4 : abandon après la borne = un seul WARNING, sans chemin complet."""
+    import logging
+
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = _patch_clear_outcomes(monkeypatch, [], default="boom")
+    _patch_store_signatures(monkeypatch, tools_mod, [10] + [11] * 6)
+
+    with caplog.at_level(logging.WARNING, logger=tools_mod.__name__):
+        for _ in range(7):
+            assert tools_mod._open_rag_client(tmp_path) is not None
+    assert len(calls) == 3
+    warnings = [r for r in caplog.records if r.name == tools_mod.__name__ and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "11" in warnings[0].getMessage()
+    assert str(tmp_path) not in warnings[0].getMessage()
+
+
+def test_h2_retry_transient_then_success_logs_nothing(tmp_path, monkeypatch, caplog):
+    """H2 retry Inspecteur 4 (non-régression) : échec transitoire puis succès = aucun WARNING."""
+    import logging
+
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    _patch_clear_outcomes(monkeypatch, ["boom", "ok"])
+    _patch_store_signatures(monkeypatch, tools_mod, [10, 11, 11, 11])
+
+    with caplog.at_level(logging.WARNING, logger=tools_mod.__name__):
+        for _ in range(4):
+            assert tools_mod._open_rag_client(tmp_path) is not None
+    assert [r for r in caplog.records if r.name == tools_mod.__name__ and r.levelno == logging.WARNING] == []
+
+
 def test_rag_store_signature_reads_max_seq_id_and_none_on_error(tmp_path):
     """H2 : marqueur réel = MAX(seq_id) de embeddings_queue ; None si fichier ou table absents."""
     import sqlite3
