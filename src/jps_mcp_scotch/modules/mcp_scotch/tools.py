@@ -773,6 +773,29 @@ def _lexical_complement(col: Any, question: str, rows: list, k: int) -> list:
         return []
 
 
+def _provenance_date(value: Any) -> str:
+    """Validate and normalize the same bounded timestamps accepted by forge.rag."""
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", value
+    ):
+        return "INCONNU"
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        return "INCONNU"
+
+
+def _result_provenance(meta: Any) -> Dict[str, Any]:
+    """Expose only validated snapshot metadata, never assert primary verification."""
+    meta = meta if isinstance(meta, dict) else {}
+    digest = meta.get("source_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        digest = "INCONNU"
+    return {"source_ts": _provenance_date(meta.get("source_ts")),
+            "index_ts": _provenance_date(meta.get("valid_from")),
+            "source_sha256": digest, "primary_verified": False}
+
+
 def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     if chromadb is None:
         return _err("chromadb not installed")
@@ -813,6 +836,7 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
             "text": d,
             "source": (m or {}).get("source") or (m or {}).get("path", ""),
             "score": round(1.0 - dist, 6),
+            "provenance": _result_provenance(m),
         }
         for d, m, dist in zip(docs, metas, dists)
     ]
@@ -834,6 +858,7 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
                 "score": round(1.0 - dist, 6),
                 "temporalite": "present",
                 "lexical": True,
+                "provenance": _result_provenance(meta),
             })
 
     # Tri stable : présent d'abord (ordre de pertinence conservé), ajouts lexicaux, historique ensuite.

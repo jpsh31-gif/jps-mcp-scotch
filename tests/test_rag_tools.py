@@ -747,3 +747,63 @@ def test_lexical_complement_nominal_et_garde_de_distance():
     ok = t._lexical_complement(_StubCol({"path": "/x/vault/guide.md"}, [0.45]), "guides rares", _pool_sature(), 5)
     far = t._lexical_complement(_StubCol({"path": "/x/vault/guide.md"}, [0.9]), "guides rares", _pool_sature(), 5)
     assert [r[0] for r in ok] == ["doc"] and far == []
+
+
+def test_provenance_semantic_chroma_fixture(tmp_path, monkeypatch):
+    """Exact ingested bytes identify the snapshot; metadata cannot assert primary verification."""
+    import hashlib
+    import json
+    raw = b"temporary synthetic reference content"
+    digest = hashlib.sha256(raw).hexdigest()
+    rag_dir = tmp_path / "provenance_rag"
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+    col.add(ids=["synthetic"], documents=[raw.decode()], metadatas=[{
+        "path": "unreadable/synthetic.md", "source_ts": "2026-10-28T09:00:00+01:00",
+        "valid_from": "2026-10-28T10:00:00Z", "source_sha256": digest,
+        "primary_verified": True, "other": "FICTIONAL_SECRET_MARKER",
+    }])
+    result = rag_query({"query": "synthetic reference content", "k": 1})
+    row = result["results"][0]
+    assert row["provenance"] == {
+        "source_ts": "2026-10-28T08:00:00Z", "index_ts": "2026-10-28T10:00:00Z",
+        "source_sha256": digest, "primary_verified": False,
+    }
+    assert "FICTIONAL_SECRET_MARKER" not in json.dumps(result)
+
+
+def test_provenance_legacy_and_malformed_do_not_leak(tmp_path, monkeypatch):
+    import json
+    rag_dir = tmp_path / "legacy_rag"
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+    col.add(ids=["legacy", "malformed"], documents=["legacy synthetic", "malformed synthetic"],
+            metadatas=[{"path": "legacy.md"}, {"path": "malformed.md", "source_ts": "FICTIONAL_SECRET_MARKER",
+                        "valid_from": 42, "source_sha256": "FICTIONAL_SECRET_MARKER", "primary_verified": True}])
+    result = rag_query({"query": "synthetic", "k": 2})
+    assert len(result["results"]) == 2
+    for row in result["results"]:
+        assert row["provenance"] == {"source_ts": "INCONNU", "index_ts": "INCONNU",
+                                      "source_sha256": "INCONNU", "primary_verified": False}
+    assert "FICTIONAL_SECRET_MARKER" not in json.dumps(result)
+
+
+def test_provenance_lexical_result(monkeypatch):
+    import hashlib
+    digest = hashlib.sha256(b"synthetic lexical reference").hexdigest()
+    class ProvenanceCol(FakeCol):
+        def query(self, *args, **kwargs):
+            result = super().query(*args, **kwargs)
+            if kwargs.get("where_document"):
+                result["metadatas"][0][0].update({"source_ts": "2026-10-28T08:00:00Z",
+                    "valid_from": "2026-10-28T10:00:00Z", "source_sha256": digest,
+                    "primary_verified": True})
+            return result
+    class ProvenanceClient(FakeClient):
+        def get_collection(self, name, **kwargs):
+            return ProvenanceCol()
+    monkeypatch.setattr(chromadb, "PersistentClient", ProvenanceClient)
+    row = rag_query({"query": "infrastructure kubernetes cluster specialisation", "k": 1})["results"][0]
+    assert row["lexical"] is True
+    assert row["provenance"] == {"source_ts": "2026-10-28T08:00:00Z", "index_ts": "2026-10-28T10:00:00Z",
+                                  "source_sha256": digest, "primary_verified": False}
