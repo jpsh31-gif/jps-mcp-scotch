@@ -671,7 +671,7 @@ def scotch_rag_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
 
 # Présent vs historique (audit 260927) : ~95 % de la collection scotch sont des checkpoints datés.
 # Un chemin d'historique ne passe jamais devant un document courant ; il reste lisible, étiqueté.
-# ⚠ Même règle côté jps-scotch tools/forge/rag (retrieve_context) — garder synchronisé.
+# ⚠ Même règle et complément lexical côté jps-scotch tools/forge/rag (retrieve_context) — garder synchronisé.
 _HISTORIQUE_RE = re.compile(
     r"(?:^|/)(?:checkpoints|_?archives?|governance)/|"
     r"(?:^|/)(?:[^/]*_(?:archive|snapshot)(?:_|\.)|semaine_|t1_week)", re.IGNORECASE
@@ -680,6 +680,97 @@ _HISTORIQUE_RE = re.compile(
 
 def _temporalite(source: str) -> str:
     return "historique" if _HISTORIQUE_RE.search(source or "") else "present"
+
+
+# Rappel lexical conditionnel (H2, 28/10/2026). Défaut mesuré : une question sur les guides techniques
+# est saturée par des checkpoints (19/20 candidats historiques) et les guides tombent au-delà du rang 120.
+# Correctif borné : SEULEMENT si le pool sémantique contient moins de k documents courants, au plus
+# _LEX_MAX_ADDED documents courants issus d'un terme rare de la question, classés par distance
+# sémantique, et jamais plus loin que le pool + _LEX_DIST_MARGIN. Aucun boost, aucun terme fréquent.
+_LEX_MAX_DF = 20
+_LEX_MAX_TERMS = 3
+_LEX_MAX_ADDED = 2
+_LEX_DIST_MARGIN = 0.10
+# Question datée ou tournée vers le passé : l'historique est légitime, aucun complément (revue indépendante 28/10).
+_LEX_HISTORIC_Q_RE = re.compile(
+    r"\b(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre|"
+    r"hier|autrefois|historique|ce mois|cette semaine|le \d{1,2}|\d{1,2}/\d{1,2}|20\d{2})\b", re.IGNORECASE
+)
+_LEX_STOPWORDS = frozenset(
+    "quelles quelle quels comment dans pour avec sont entre cette leurs faire fait mettre alors ainsi chaque "
+    "toute tous plus moins sans sous vers depuis après avant donc même autre autres peut peuvent doit doivent "
+    "ceux celui elles quand lorsque comme aussi être avoir quoi dont".split()
+)
+
+
+def _lexical_terms(question: str) -> list[str]:
+    words = re.findall(r"[a-zàâçéèêëîïôûùüÿ_]{5,}", (question or "").lower())
+    return [w for w in dict.fromkeys(words) if w not in _LEX_STOPWORDS][:12]
+
+
+def _lexical_complement(col: Any, question: str, rows: list, k: int) -> list:
+    """Documents courants à ajouter quand le pool sémantique en manque ; [] si rien d'admissible.
+
+    rows = liste de tuples (doc, meta, dist, id) du pool sémantique.
+    Retourne une liste de tuples (doc, meta, dist).
+    Best-effort : toute erreur → [] (comportement historique).
+    """
+    try:
+        if not rows or _LEX_HISTORIC_Q_RE.search(question or ""):
+            return []
+
+        present = [
+            r for r in rows
+            if _temporalite((r[1] or {}).get("source") or (r[1] or {}).get("path", "")) == "present"
+        ]
+        if len(present) >= k:
+            return []
+
+        seen_ids = {r[3] for r in rows}
+        ceiling = max(r[2] for r in rows) + _LEX_DIST_MARGIN
+
+        scored = []
+        for term in _lexical_terms(question):
+            ids = col.get(where_document={"$contains": term}, include=[], limit=_LEX_MAX_DF + 1).get("ids", [])
+            if 1 <= len(ids) <= _LEX_MAX_DF:
+                scored.append((len(ids), term))
+
+        found = {}
+        for _, term in sorted(scored)[:_LEX_MAX_TERMS]:
+            res = col.query(
+                query_texts=[question],
+                where_document={"$contains": term},
+                n_results=min(k, _LEX_MAX_DF),
+                include=["documents", "distances", "metadatas"],
+            )
+            r_docs = (res.get("documents") or [[]])[0] or []
+            r_metas = (res.get("metadatas") or [[]])[0] or []
+            r_dists = (res.get("distances") or [[]])[0] or []
+            r_ids = (res.get("ids") or [[]])[0] or []
+
+            for i in range(len(r_docs)):
+                doc_id = str(r_ids[i]) if i < len(r_ids) else ""
+                if not doc_id or doc_id in seen_ids:
+                    continue
+
+                meta = r_metas[i] if i < len(r_metas) else {}
+                source = (meta or {}).get("source") or (meta or {}).get("path", "")
+                if not source or _temporalite(source) != "present":
+                    continue
+
+                if i >= len(r_dists):
+                    continue
+                dist = float(r_dists[i])
+                if dist > ceiling:
+                    continue
+
+                doc = r_docs[i]
+                if doc_id not in found or dist < found[doc_id][2]:
+                    found[doc_id] = (doc, meta, dist)
+
+        return sorted(found.values(), key=lambda r: r[2])[:_LEX_MAX_ADDED]
+    except Exception:
+        return []
 
 
 def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -709,6 +800,7 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     docs = results["documents"][0] if results.get("documents") else []
     metas = results["metadatas"][0] if results.get("metadatas") else []
     dists = results["distances"][0] if results.get("distances") else []
+    ids = results["ids"][0] if results.get("ids") else []
     # Provenance: the 14 live collections were built by forge.rag / scotch_v6
     # ingest which stores the file path under metadata key "path" (verified
     # 260613: scotch/doctrine/skills metas = {size_bytes, path, lines}). Only
@@ -726,9 +818,27 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
     ]
     for c in chunks:
         c["temporalite"] = _temporalite(c["source"])
-    # Tri stable : présent d'abord (ordre de pertinence conservé), historique ensuite.
-    chunks = sorted(chunks, key=lambda c: c["temporalite"] != "present")[:k]
-    return {"ok": True, "results": chunks, "collection": collection, "k": k}
+
+    present_chunks = [c for c in chunks if c["temporalite"] == "present"]
+    historique_chunks = [c for c in chunks if c["temporalite"] != "present"]
+
+    extra_chunks: List[Dict[str, Any]] = []
+    if len(present_chunks) < k and chunks:
+        rows = list(zip(docs, metas, dists, ids))
+        extra_rows = _lexical_complement(col, query, rows, k)
+        for doc, meta, dist in extra_rows:
+            source = (meta or {}).get("source") or (meta or {}).get("path", "")
+            extra_chunks.append({
+                "text": doc,
+                "source": source,
+                "score": round(1.0 - dist, 6),
+                "temporalite": "present",
+                "lexical": True,
+            })
+
+    # Tri stable : présent d'abord (ordre de pertinence conservé), ajouts lexicaux, historique ensuite.
+    final_chunks = (present_chunks + extra_chunks + historique_chunks)[:k]
+    return {"ok": True, "results": final_chunks, "collection": collection, "k": k}
 
 
 def rag_stats(args: Dict[str, Any]) -> Dict[str, Any]:  # noqa: ARG001
