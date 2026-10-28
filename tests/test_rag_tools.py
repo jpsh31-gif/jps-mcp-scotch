@@ -429,3 +429,283 @@ def test_rag_query_present_avant_historique(tmp_path, monkeypatch):
     res = rag_query({"query": "serveur MCP port 8765 architecture mvp0", "k": 3})["results"]
     assert res[0]["temporalite"] == "present" and res[0]["source"].endswith("jps-mcp_GUIDE.md")
     assert [r["temporalite"] for r in res[1:]] == ["historique", "historique"]
+
+
+# ── Tests complément lexical (H2 — 28/10/2026) ────────────────────────────────
+
+def test_lexical_terms_extraction_and_stopwords():
+    """_lexical_terms extrait les termes >= 5 lettres, exclut les stopwords, max 12 termes."""
+    from jps_mcp_scotch.modules.mcp_scotch.tools import _lexical_terms
+
+    # Mots courts (< 5 lettres) et stopwords exclus
+    terms = _lexical_terms("Quelles sont les guides techniques pour le RAG et MCP dans ce dépôt ?")
+    assert "guides" in terms
+    assert "techniques" in terms
+    assert "dépôt" in terms or "depot" in terms or any("d" in t for t in terms)
+    # Stopwords exclus
+    assert "quelles" not in terms
+    assert "sont" not in terms
+    assert "pour" not in terms
+    assert "dans" not in terms
+    # Mots < 5 lettres exclus
+    assert "rag" not in terms
+    assert "mcp" not in terms
+
+
+def test_lexical_historic_regex():
+    """_LEX_HISTORIC_Q_RE détecte les questions tournées vers l'historique ou datées."""
+    from jps_mcp_scotch.modules.mcp_scotch.tools import _LEX_HISTORIC_Q_RE
+
+    assert _LEX_HISTORIC_Q_RE.search("rapport le 15 octobre 2026")
+    assert _LEX_HISTORIC_Q_RE.search("checkpoint hier soir")
+    assert _LEX_HISTORIC_Q_RE.search("etat historique du repo")
+    assert _LEX_HISTORIC_Q_RE.search("faits marquants ce mois")
+    assert _LEX_HISTORIC_Q_RE.search("notes de janvier")
+    # Questions neutres / présentes
+    assert not _LEX_HISTORIC_Q_RE.search("guides techniques pour deploiement mcp")
+    assert not _LEX_HISTORIC_Q_RE.search("architecture actuelle et configuration")
+
+
+def test_rag_query_lexical_pas_de_complement_si_assez_de_presents(tmp_path, monkeypatch):
+    """Pas de complément lexical déclenché si le pool contient déjà au moins k documents courants."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    col.add(
+        documents=[
+            "serveur MCP guide architecture document un",
+            "serveur MCP guide architecture document deux",
+            "serveur MCP guide architecture document trois",
+            "serveur MCP archive historique checkpoint zero",
+        ],
+        metadatas=[
+            {"path": "/Users/jp/GitHub/jps-scotch/vault/guide1.md"},
+            {"path": "/Users/jp/GitHub/jps-scotch/vault/guide2.md"},
+            {"path": "/Users/jp/GitHub/jps-scotch/vault/guide3.md"},
+            {"path": "/Users/jp/GitHub/jps-scotch/scotch/checkpoints/CP_old.md"},
+        ],
+        ids=["p1", "p2", "p3", "h0"],
+    )
+
+    # k=2, le pool contient 3 documents courants >= 2
+    res = rag_query({"query": "serveur MCP guide architecture", "k": 2})["results"]
+    assert len(res) == 2
+    assert all(r["temporalite"] == "present" for r in res)
+    assert all("lexical" not in r for r in res)
+
+
+class FakeCol:
+    """Collection factice déterministe pour tester le complément lexical sans embeddings réels."""
+
+    def count(self) -> int:
+        return 4
+
+    def query(
+        self,
+        query_texts: list[str] | None = None,
+        n_results: int | None = None,
+        where_document: dict | None = None,
+        include: list[str] | None = None,
+        **kwargs,
+    ) -> dict:
+        if where_document:
+            # Requête lexicale : 1 document courant au terme rare
+            return {
+                "documents": [["guide specialisation technique courant"]],
+                "metadatas": [[{"source": "/Users/jp/GitHub/jps-scotch/vault/specialisation_GUIDE.md"}]],
+                "distances": [[0.15]],
+                "ids": [["p_spec"]],
+            }
+        # Pool sémantique : 4 checkpoints historiques (k=1 donc n_results=4)
+        return {
+            "documents": [[f"checkpoint note detaillee numero {i}" for i in range(4)]],
+            "metadatas": [[{"source": f"/Users/jp/GitHub/jps-scotch/scotch/beta_prime/checkpoints/CP_{i}.md"} for i in range(4)]],
+            "distances": [[0.10 * (i + 1) for i in range(4)]],
+            "ids": [[f"h_{i}" for i in range(4)]],
+        }
+
+    def get(
+        self,
+        where_document: dict | None = None,
+        limit: int | None = None,
+        include: list[str] | None = None,
+        **kwargs,
+    ) -> dict:
+        if where_document and where_document.get("$contains") == "specialisation":
+            return {"ids": ["p_spec"]}
+        return {"ids": []}
+
+
+class FakeClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def get_collection(self, name: str, **kwargs):
+        return FakeCol()
+
+
+def test_rag_query_lexical_ajout_quand_pool_sature_historique(monkeypatch):
+    """Ajout de documents courants via complément lexical quand le pool sémantique est saturé d'historique.
+    Déterministe via FakeCol : le pool sémantique renvoie 4 checkpoints historiques (k=1 donc n_results=4)
+    et le lexical renvoie 1 document courant au terme rare."""
+    monkeypatch.setattr(chromadb, "PersistentClient", FakeClient)
+
+    # k=1 : n_results=4 (pool historique saturé), l'ajout lexical est en première position
+    res = rag_query({"query": "infrastructure kubernetes cluster specialisation", "k": 1})
+    assert res.get("ok") is True
+    chunks = res["results"]
+    assert len(chunks) == 1
+    assert chunks[0]["temporalite"] == "present"
+    assert chunks[0]["source"].endswith("specialisation_GUIDE.md")
+    assert chunks[0].get("lexical") is True
+    assert all("lexical" not in c for c in chunks[1:])
+
+    # k=2 : ajout marqué lexical=True en 1ère position (présent d'abord), les autres chunks sans 'lexical'
+    res2 = rag_query({"query": "infrastructure kubernetes cluster specialisation", "k": 2})
+    assert res2.get("ok") is True
+    chunks2 = res2["results"]
+    assert len(chunks2) == 2
+    assert chunks2[0]["temporalite"] == "present"
+    assert chunks2[0]["source"].endswith("specialisation_GUIDE.md")
+    assert chunks2[0].get("lexical") is True
+    assert chunks2[1]["temporalite"] == "historique"
+    assert "lexical" not in chunks2[1]
+    assert all("lexical" not in c for c in chunks2[1:])
+
+
+def test_rag_query_lexical_terme_df_sup_20_ignore(tmp_path, monkeypatch):
+    """Un terme présent dans plus de 20 documents (df > _LEX_MAX_DF) est ignoré par le complément lexical."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    # 22 checkpoints contenant le mot "diagnostic" (df = 22 > 20)
+    hist_docs = [f"rapport checkpoint historique anomalie diagnostic test {i}" for i in range(22)]
+    hist_metas = [{"path": f"/Users/jp/GitHub/jps-scotch/scotch/checkpoints/CP_{i}.md"} for i in range(22)]
+    hist_ids = [f"h_{i}" for i in range(22)]
+
+    # 1 document courant avec "diagnostic"
+    present_doc = ["guide technique resolution anomalie diagnostic"]
+    present_meta = [{"path": "/Users/jp/GitHub/jps-scotch/vault/diagnostic_guide.md"}]
+    present_id = ["p_diag"]
+
+    col.add(
+        documents=hist_docs + present_doc,
+        metadatas=hist_metas + present_meta,
+        ids=hist_ids + present_id,
+    )
+
+    # Question contenant le terme fréquent "diagnostic"
+    res = rag_query({"query": "anomalie diagnostic", "k": 3})["results"]
+    # "diagnostic" a df=23 > 20 -> ignoré pour le complément lexical
+    assert all("lexical" not in r for r in res)
+
+
+def test_rag_query_lexical_question_datee_sans_complement(tmp_path, monkeypatch):
+    """Une question datée (« le 15 octobre », « 2024 »...) ne déclenche aucun complément lexical."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    hist_docs = [f"rapport checkpoint de maintenance {i}" for i in range(5)]
+    hist_metas = [{"path": f"/Users/jp/GitHub/jps-scotch/scotch/checkpoints/CP_{i}.md"} for i in range(5)]
+    hist_ids = [f"h_{i}" for i in range(5)]
+
+    present_doc = ["guide maintenance infrastructure installation"]
+    present_meta = [{"path": "/Users/jp/GitHub/jps-scotch/vault/maintenance.md"}]
+    present_id = ["p_maint"]
+
+    col.add(
+        documents=hist_docs + present_doc,
+        metadatas=hist_metas + present_meta,
+        ids=hist_ids + present_id,
+    )
+
+    res = rag_query({"query": "rapport maintenance le 15 octobre", "k": 3})["results"]
+    assert all("lexical" not in r for r in res)
+
+
+def test_rag_query_lexical_garde_de_distance(tmp_path, monkeypatch):
+    """Un document courant contenant le terme rare est rejeté si sa distance dépasse ceiling = max(dists) + 0.10."""
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    # Checkpoints très proches de la requête sémantique sur la cryptographie
+    hist_docs = [
+        f"cryptographie asymetrique signature numerique hash sha256 algorithme cle publique prive checkpoint {i}"
+        for i in range(5)
+    ]
+    hist_metas = [{"path": f"/Users/jp/GitHub/jps-scotch/scotch/checkpoints/CP_{i}.md"} for i in range(5)]
+    hist_ids = [f"h_{i}" for i in range(5)]
+
+    # Document présent avec le terme lexical "botanique", mais sémantiquement totalement hors sujet
+    unrelated_present_doc = ["recette de gateau chocolat farine sucre vanille cuisson botanique"]
+    unrelated_present_meta = [{"path": "/Users/jp/GitHub/jps-scotch/vault/recettes/gateau.md"}]
+    unrelated_present_id = ["p_botanique"]
+
+    col.add(
+        documents=hist_docs + unrelated_present_doc,
+        metadatas=hist_metas + unrelated_present_meta,
+        ids=hist_ids + unrelated_present_id,
+    )
+
+    # Requête très ciblée sur la cryptographie, avec terme rare "botanique"
+    res = rag_query({"query": "cryptographie asymetrique signature numerique botanique", "k": 3})["results"]
+    # Le document botanique a une distance sémantique très élevée (> ceiling), il doit être filtré
+    assert all("lexical" not in r for r in res)
+
+
+def test_rag_query_lexical_exception_interne_degrade_proprement(tmp_path, monkeypatch):
+    """Une exception interne lors du complément lexical dégrade proprement sans impacter rag_query."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as t
+
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    col = chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    col.add(
+        documents=["serveur MCP checkpoint note historique"] * 4,
+        metadatas=[{"path": f"/Users/jp/GitHub/jps-scotch/scotch/checkpoints/CP_{i}.md"} for i in range(4)],
+        ids=[f"h_{i}" for i in range(4)],
+    )
+
+    def _broken_lexical_terms(*_args, **_kwargs):
+        raise RuntimeError("Crash interne simulé")
+
+    monkeypatch.setattr(t, "_lexical_terms", _broken_lexical_terms)
+
+    res = t.rag_query({"query": "serveur MCP architecture", "k": 3})
+    assert res.get("ok") is True
+    assert len(res.get("results", [])) == 3
+    assert all("lexical" not in r for r in res["results"])
+
+
+def test_rag_query_lexical_cle_presente_seulement_sur_ajouts(monkeypatch):
+    """La clé 'lexical: True' n'est présente QUE sur les ajouts lexicaux, jamais sur le pool initial.
+    Déterministe via FakeCol : le pool sémantique renvoie 4 checkpoints historiques et le lexical
+    renvoie 1 document courant au terme rare."""
+    monkeypatch.setattr(chromadb, "PersistentClient", FakeClient)
+
+    # k=2 : 1 ajout lexical en première position (présent d'abord), l'autre chunk sans la clé 'lexical'
+    res = rag_query({"query": "serveur base donnees cluster specialisation", "k": 2})
+    assert res.get("ok") is True
+    chunks = res["results"]
+    assert len(chunks) == 2
+
+    # Ajout marqué lexical=True en première position (présent d'abord)
+    assert chunks[0]["temporalite"] == "present"
+    assert chunks[0]["source"].endswith("specialisation_GUIDE.md")
+    assert chunks[0].get("lexical") is True
+
+    # Les autres chunks sans la clé 'lexical'
+    assert chunks[1]["temporalite"] == "historique"
+    assert "lexical" not in chunks[1]
+    assert all("lexical" not in c for c in chunks[1:])
+
