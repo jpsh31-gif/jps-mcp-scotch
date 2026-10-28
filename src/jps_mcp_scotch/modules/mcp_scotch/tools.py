@@ -15,7 +15,9 @@ import hashlib
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -154,6 +156,51 @@ def _resolve_rag_dir() -> Path:
     if env:
         return Path(env)
     return Path(_LEGACY_JPS_SCOTCH) / "scotch" / "rag"
+
+
+_RAG_STORE_SIGNATURES: Dict[str, Any] = {}
+_RAG_STORE_LOCK = threading.Lock()
+
+
+def _rag_store_signature(rag_dir: Path) -> Any:
+    """Marqueur d'écriture du store : MAX(seq_id) de embeddings_queue, lu en lecture seule.
+
+    Store vide = 0 (lecture réussie). None seulement si illisible (fichier absent, table absente,
+    verrou) : None ne déclenche jamais de vidage.
+    """
+    db = rag_dir / "chroma.sqlite3"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT MAX(seq_id) FROM embeddings_queue").fetchone()
+        return row[0] if row and row[0] is not None else 0
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _open_rag_client(rag_dir: Path) -> Any:
+    """Ouvre le client Chroma ; si le store a changé depuis la dernière vue, vide le cache partagé (H2).
+
+    Un document ajouté par un autre processus n'est sinon pas visible sans redémarrage du service.
+    Échec de l'assistant = comportement d'avant, sans erreur nouvelle.
+    """
+    key = str(rag_dir)
+    signature = _rag_store_signature(rag_dir)  # lecture SQLite hors verrou (timeout jusqu'à 1 s)
+    with _RAG_STORE_LOCK:
+        if isinstance(signature, int):
+            previous = _RAG_STORE_SIGNATURES.get(key)
+            if isinstance(previous, int) and previous != signature:
+                try:
+                    from chromadb.api.shared_system_client import SharedSystemClient
+                    SharedSystemClient.clear_system_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+            _RAG_STORE_SIGNATURES[key] = signature
+    return chromadb.PersistentClient(path=str(rag_dir))
 
 
 def _scotch_cli_path() -> Path:
@@ -814,7 +861,7 @@ def rag_query(args: Dict[str, Any]) -> Dict[str, Any]:
         return _err(f"Invalid collection '{collection}'. Valid: {sorted(VALID_COLLECTIONS)}")
     rag_dir = _resolve_rag_dir()
     try:
-        client = chromadb.PersistentClient(path=str(rag_dir))
+        client = _open_rag_client(rag_dir)
         col = client.get_collection(collection)
         # Sur-échantillonnage : laisse aux documents courants la place de passer devant.
         results = col.query(query_texts=[query], n_results=min(k * 4, max(col.count(), 1)))
@@ -871,7 +918,7 @@ def rag_stats(args: Dict[str, Any]) -> Dict[str, Any]:  # noqa: ARG001
         return _err("chromadb not installed")
     rag_dir = _resolve_rag_dir()
     try:
-        client = chromadb.PersistentClient(path=str(rag_dir))
+        client = _open_rag_client(rag_dir)
         collections_info: Dict[str, Any] = {}
         for col_obj in client.list_collections():
             col = client.get_collection(col_obj.name)

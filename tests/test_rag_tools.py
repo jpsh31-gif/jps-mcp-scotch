@@ -807,3 +807,173 @@ def test_provenance_lexical_result(monkeypatch):
     assert row["lexical"] is True
     assert row["provenance"] == {"source_ts": "2026-10-28T08:00:00Z", "index_ts": "2026-10-28T10:00:00Z",
                                   "source_sha256": digest, "primary_verified": False}
+
+
+def test_rag_query_sees_document_added_by_other_process(ephemeral_rag):
+    """H2 : un document ajouté par un autre processus doit être trouvé sans redémarrage."""
+    import subprocess
+    import sys
+
+    first = rag_query({"query": "seed", "collection": "scotch", "k": 1})
+    assert first["ok"] is True
+
+    marker = "H2FRAICHEUR quokka zeppelin marqueur unique"
+    writer = (
+        "import sys, chromadb\n"
+        "client = chromadb.PersistentClient(path=sys.argv[1])\n"
+        "client.get_collection('scotch').add(documents=[sys.argv[2]], "
+        "metadatas=[{'source': 'tests/fresh.md'}], ids=['fresh-0'])\n"
+    )
+    subprocess.run([sys.executable, "-c", writer, str(ephemeral_rag), marker], check=True)
+
+    second = rag_query({"query": marker, "collection": "scotch", "k": 1})
+    assert second["ok"] is True
+    assert any(marker in row["text"] for row in second["results"])
+
+
+def _patch_store_signatures(monkeypatch, tools_mod, values):
+    """Remplace le marqueur de store par une suite de valeurs, une par ouverture."""
+    seq = iter(values)
+    monkeypatch.setattr(tools_mod, "_rag_store_signature", lambda rag_dir: next(seq))
+    monkeypatch.setattr(chromadb, "PersistentClient", lambda path: object())
+
+
+def test_open_rag_client_clears_only_when_integer_marker_changes(tmp_path, monkeypatch):
+    """H2 : pas de vidage si le marqueur est stable ; un vidage à chaque changement d'entier (hausse ou baisse)."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = []
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(lambda cls: calls.append(1)))
+    _patch_store_signatures(monkeypatch, tools_mod, [5, 5, 6, 6, 3])
+
+    for _ in range(5):
+        tools_mod._open_rag_client(tmp_path)
+    assert calls == [1, 1]
+
+
+def test_open_rag_client_never_clears_on_none_marker(tmp_path, monkeypatch):
+    """H2 : None (illisible) ne déclenche jamais de vidage, ni avant ni après un entier."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = []
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(lambda cls: calls.append(1)))
+    _patch_store_signatures(monkeypatch, tools_mod, [None, 5, None, None, 5])
+
+    for _ in range(5):
+        assert tools_mod._open_rag_client(tmp_path) is not None
+    assert calls == []
+
+
+def test_open_rag_client_survives_missing_or_failing_cache_api(tmp_path, monkeypatch):
+    """H2 : assistant absent ou en exception = comportement d'avant, sans erreur."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    _patch_store_signatures(monkeypatch, tools_mod, [1, 2, 3])
+
+    def boom(cls):
+        raise RuntimeError("cache indisponible")
+
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(boom))
+    assert tools_mod._open_rag_client(tmp_path) is not None
+    assert tools_mod._open_rag_client(tmp_path) is not None
+
+    monkeypatch.delattr(SharedSystemClient, "clear_system_cache")
+    assert tools_mod._open_rag_client(tmp_path) is not None
+
+
+def test_rag_store_signature_reads_max_seq_id_and_none_on_error(tmp_path):
+    """H2 : marqueur réel = MAX(seq_id) de embeddings_queue ; None si fichier ou table absents."""
+    import sqlite3
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    assert tools_mod._rag_store_signature(tmp_path) is None
+
+    db = tmp_path / "chroma.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE embeddings_queue (seq_id INTEGER PRIMARY KEY, topic TEXT)")
+    conn.execute("INSERT INTO embeddings_queue (topic) VALUES ('a')")
+    conn.commit()
+    conn.close()
+    before = tools_mod._rag_store_signature(tmp_path)
+    assert isinstance(before, int)
+
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO embeddings_queue (topic) VALUES ('b')")
+    conn.commit()
+    conn.close()
+    assert tools_mod._rag_store_signature(tmp_path) == before + 1
+
+
+def test_rag_query_without_write_never_clears_shared_cache(ephemeral_rag, monkeypatch):
+    """H2 : sans écriture entre les appels, 20 rag_query ne doivent jamais vider le cache partagé."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = []
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(lambda cls: calls.append(1)))
+    for _ in range(20):
+        assert rag_query({"query": "seed", "collection": "scotch", "k": 1})["ok"] is True
+    assert calls == []
+
+
+def test_rag_query_ignores_mtime_touch_without_write(ephemeral_rag, monkeypatch):
+    """H2 : mtime de chroma.sqlite3 modifié SANS écriture (simulé par os.utime) : pas de vidage du cache."""
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+    from chromadb.api.shared_system_client import SharedSystemClient
+
+    monkeypatch.setattr(tools_mod, "_RAG_STORE_SIGNATURES", {})
+    calls = []
+    monkeypatch.setattr(SharedSystemClient, "clear_system_cache", classmethod(lambda cls: calls.append(1)))
+    db = ephemeral_rag / "chroma.sqlite3"
+    assert rag_query({"query": "seed", "collection": "scotch", "k": 1})["ok"] is True
+    for i in range(1, 6):
+        os.utime(db, ns=(1_700_000_000_000_000_000 + i, 1_700_000_000_000_000_000 + i))
+        assert rag_query({"query": "seed", "collection": "scotch", "k": 1})["ok"] is True
+    assert calls == []
+
+
+def test_rag_query_sees_first_document_added_to_empty_store(tmp_path, monkeypatch):
+    """H2 : store vide (0 document) ouvert une fois, puis document ajouté par un autre processus : trouvé."""
+    import subprocess
+    import sys
+
+    rag_dir = tmp_path / "rag"
+    rag_dir.mkdir()
+    monkeypatch.setenv("JPS_RAG_DIR", str(rag_dir))
+    chromadb.PersistentClient(path=str(rag_dir)).get_or_create_collection("scotch")
+
+    first = rag_query({"query": "seed", "collection": "scotch", "k": 1})
+    assert first["ok"] is True
+    assert first["results"] == []
+
+    marker = "H2VIDE quokka premier document marqueur"
+    writer = (
+        "import sys, chromadb\n"
+        "client = chromadb.PersistentClient(path=sys.argv[1])\n"
+        "client.get_collection('scotch').add(documents=[sys.argv[2]], "
+        "metadatas=[{'source': 'tests/fresh.md'}], ids=['fresh-0'])\n"
+    )
+    subprocess.run([sys.executable, "-c", writer, str(rag_dir), marker], check=True)
+
+    second = rag_query({"query": marker, "collection": "scotch", "k": 1})
+    assert second.get("ok") is True, second
+    assert any(marker in row["text"] for row in second["results"])
+
+
+def test_rag_store_signature_empty_table_is_zero_not_none(tmp_path):
+    """H2 : table vide = 0 (lecture réussie) ; None reste réservé aux erreurs."""
+    import sqlite3
+    from jps_mcp_scotch.modules.mcp_scotch import tools as tools_mod
+
+    conn = sqlite3.connect(tmp_path / "chroma.sqlite3")
+    conn.execute("CREATE TABLE embeddings_queue (seq_id INTEGER PRIMARY KEY, topic TEXT)")
+    conn.commit()
+    conn.close()
+    assert tools_mod._rag_store_signature(tmp_path) == 0
